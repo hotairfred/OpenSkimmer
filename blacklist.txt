@@ -146,3 +146,16 @@ G5E
 #         dit-heavy-only) or a live-density A/B method is built.
 I5I
 SE5I
+
+#   E5ET: 4-char dit-heavy hallucination (E=· 5=····· E=· T=─ → 7 dits
+#         + 1 dah).  NOT in MASTER.SCP — emitted via scp_bypass_threshold=2
+#         path as [unverified].  Observed 2026-05-25 21:57Z on 10100.6 kHz
+#         (30m), raw decode text was pure E/T/I/A noise.  Same path as I5I.
+#
+#   EU4U: 4-char SCP-bucket target (E=· U=··─ 4=····─ U=··─).  IN MASTER.SCP.
+#         Hit via gate_scp_bucket_substitute path: ES4U raw → edit-1 → EU4U.
+#         Observed 2026-05-25 21:56Z on 10100.5 kHz (30m), 50 Hz away from
+#         the simultaneous E5ET emit (same noise source, different decoder
+#         output paths).  Same class as SE5I.
+E5ET
+EU4U
