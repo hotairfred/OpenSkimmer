@@ -1420,6 +1420,13 @@ def _itila_extract_cq_call(text, valid_calls=None):
     candidates = []
 
     # Fuzzy CQ trigger matching: allow 1-char substitution (FWT→CWT, TES→TEST, CWE→CWT)
+    # Same-kind constraint on the substituted char: Morse confusions happen
+    # between letters (F=··─· ↔ C=─·─·, T=─ ↔ E=·) but not between letters
+    # and digits (digits are all 5-element, most letters are 1-4 elements —
+    # a decoder mishear would mangle other chars too).  Without this, "C2"
+    # fuzzy-matches "CQ" (Q→2), turning every Nauru-prefix-shaped noise
+    # token into a CQ trigger and emitting C2Y when the real call was NC2Y
+    # (observed 2026-05-25 on 14046).
     _FUZZY_CQ = {'CQ', 'CWT', 'TEST', 'SST', 'MST', 'FD', 'SS', 'NA', 'UP'}
     def _is_cq_trigger(tok):
         if tok in _ITILA_CQ_WORDS:
@@ -1427,8 +1434,10 @@ def _itila_extract_cq_call(text, valid_calls=None):
         if len(tok) < 2 or len(tok) > 5:
             return False
         for cq in _FUZZY_CQ:
-            if len(tok) == len(cq) and sum(a != b for a, b in zip(tok, cq)) == 1:
-                return True
+            if len(tok) == len(cq):
+                diffs = [(a, b) for a, b in zip(tok, cq) if a != b]
+                if len(diffs) == 1 and diffs[0][0].isalpha() == diffs[0][1].isalpha():
+                    return True
             if len(tok) == len(cq) - 1 and cq.startswith(tok):
                 return True
         return False
