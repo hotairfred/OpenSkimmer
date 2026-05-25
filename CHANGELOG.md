@@ -56,6 +56,116 @@ Pre-1.0 alpha. No versioned releases yet — entries are dated.
   investigating but not blocking.  Watchdog scripts should expect
   `SIGTERM → wait 20s → SIGKILL` pattern.
 
+### Diagnostic + observability shipped
+- **Bin-age histogram + per-band Health log** (`c89c2a2`).  New C API
+  `itila_sc_list_bin_ages()` + Python wrapper.  Health line now emits
+  per-band breakdown: `BinAge: 80m:34|30,3,1,0 40m:296|180,80,30,6 ...`
+  where the bucket counts are `<30s, <60s, <300s, 300s+` in age.
+  Discriminates "healthy busy band" (exponential age curve) from
+  "eviction broken" (long 300s+ tail).
+- **BinFreqs diagnostic** (`5a39023`): when any band has ≥80 bins,
+  log the actual bin frequencies.  Used to confirm 10m noise zone
+  was a stable RFI signature, not random CFAR statistical artifacts.
+
+### Band coverage recovered
+- **Per-band CW window derived from IARU R2 band-plan lookup**
+  (`08cbeb2`).  Previous heuristic `(center-100, center-20)` assumed
+  the receiver center was 20-100 kHz ABOVE the CW segment.  Broke on
+  30m/17m/12m where the configured centers sit IN the CW segment —
+  scanners were looking at empty spectrum BELOW the band.  Confirmed
+  by 10-hour spot histogram: 30m/17m/12m at zero spots before fix.
+  New lookup matches by R2 band plan, FT8-aware (excludes FT8 zones
+  by default, FT4 left in per WF8Z preference — CW drifts into FT4
+  sub-bands during contests).  Recovered 30m/17m as actively
+  spot-producing within 30 min of deploy.
+
+### Anti-noise-hallucination guards
+- **`gate_short_scp_exact`** (`a2e0890`).  Closes a bypass in the
+  M5M-class guard: `process_intent` synthesizes `"CQ <call> "` text
+  before delegating to `process()`, which makes `has_context=True`,
+  which bypasses the multi-sighting requirement.  ≤3-char SCP
+  entries via ITILA `[exact]` path were emitting on first sighting,
+  re-creating the G5E/SE5E operator-complaint class.  New gate
+  requires 2 sightings at same freq within 10 min for ≤3-char SCP
+  emits.  Real contest CQers repeat continuously so latency cost is
+  negligible; noise rarely reproduces the same call at same freq.
+  Memory entry in `project_short_scp_exact_decode_gap.md`.
+- **Blacklist updates**: SE5E (`09eec2d`), G5E (`7a12fe2`), I5I + SE5I
+  (`af36a80`).  Each with comment block documenting the noise pattern
+  (dit-heavy, ≤4 chars), observed frequencies, and which gate path
+  let it through (bucket-substitute / [exact] / [unverified] bypass).
+- **`per_band_min_snr` config mechanism** (`f220491` — currently
+  empty in `sk_5band.json`).  Lets operators raise CFAR threshold on
+  individual bands.  Tested 10m at 15 dB, found it killed 76% of CW
+  spots while only reducing bins 60% — too aggressive when 10m's
+  bins turned out to be RFI not signals (`5a39023` revert).  Mechanism
+  retained for future use.
+
+### Documentation + benchmarking
+- **README dual-key benchmark** (`ccb000a` → `566427c` → `2b57b5f`).
+  Replaced the prior `81%` vs SkimSrv-curated-56-key claim with
+  three-number framing per Grayline's dual-ground-truth methodology:
+  - `recall_local` (vs SkimSrv-curated 56-key): **92.9%** — fair
+    decoder-quality metric, controls for antenna+propagation.
+  - `recall_global` (vs RBN ≥2 consensus 153-key): **49.7%** —
+    propagation-limited band coverage.
+  - **2× CW Skimmer offline-mode RBN recall** on same audio.
+  - **20 calls SparkGap + CW Skimmer agreed on but RBN missed**
+    (the local-coverage advantage of antenna-co-located decoding).
+- **rbn-feeding how-to** (`84455e0`): `docs/rbn-feeding.md` describes
+  the native Linux feeder path (sparkgap → :7300 telnet →
+  `rbn_feeder.py` → RBN ingest) without publishing the reverse-
+  engineered protocol details (those stay in the source).  README
+  refreshed to drop stale "via Aggregator on Windows" language.
+
+### Eval infrastructure
+- **`tools/eval/b1_benchmark.py` + `rbn_key_gen.py` + per-segment
+  keys** (`5fe5ee8`, `6f0a6b7`).  Multi-recording harness scoring
+  against keys derived from RBN historical CSV with ≥2-spotter
+  consensus filter.  Per-segment cq_keys for B1 (seg1/2/3/4) now
+  tracked in `tools/eval/keys/`.
+- **263-call full-B1 SkimSrv key recovered** (`7b19dcc`).  Arc found
+  it embedded in old JSONL transcript after three of us declared it
+  "lost."  Saved as `tools/eval/keys/B1_full_cq_key_cwskim263.txt`.
+  Lesson in `feedback_user_memory_beats_agent_search.md`: when user
+  insists an artifact exists and search returns null, widen search
+  surface before declaring user wrong.
+
+### Configuration
+- **`enable_ft8` / `enable_rtty` split** (`73b7a79`).  Previously
+  bundled — `enable_ft8=false` killed RTTY scan too.  Independent
+  now; IQ capture buffer + minute-aligned decode thread run if
+  either set.
+- **RTTY off for WPX CW** (`41895b4`, in `sk_5band.json`).  Will be
+  flipped back after the contest weekend.
+- **`itila_max_bins` 400 → 600** (this commit).  Pre-WPX bump for
+  contest density — saw `peak=400` cap hit on US-daytime activity
+  and contest density will be 3-5× higher.  Per-bin committed ~1 MB
+  × 600 × 8 bands ≈ 8 GB worst case (vs 14 GB total, watchdog at
+  11 GB).  Margin verified by today's leak fix holding RSS in
+  sawtooth band.
+- **`gate_short_scp_bucket` + `gate_short_scp_exact` extension ≤3 →
+  ≤4 chars — TRIED, REVERTED**.  Goal was to cover SE5I-class
+  (4-char dit-heavy SCP entries: SE5E, SE5I, SE5S, SE5T, II5T).
+  B1_seg2 A/B with the extension regressed recall by 7 calls vs
+  56-curated (52→45) and 12 calls vs 147-RBN (78→66), including
+  real US contest 4-chars like K0TG, K6AR, K5MR, K0AWU.  Root
+  cause: the gate requires 2 sightings at same freq within 10 min
+  before first emit; in a 15-min file-mode segment, real 4-char
+  CQers often only register once.  Live mode behaviour might
+  differ (CQers repeat for hours), but file mode is the only
+  validation tool available, and a measurable regression beats a
+  speculative live benefit.  Coverage of the SE5I class continues
+  via the per-call blacklist (I5I, SE5I added today).  Revisit
+  with smarter filter (e.g., dit-heavy ≤4 only) once a live A/B
+  method exists (task #109).
+
+### WPX prep (contest weekend 2026-05-30/31)
+- **Watchdog** (`tools/sparkgap_watchdog.sh`, `41895b4`).  Running
+  on skimmer1 as PID 3639038.  Kills + restarts sparkgap.py if RSS
+  exceeds 11 GB.  Belt-and-suspenders for the 48 hours WF8Z will be
+  operating in the contest and can't babysit the skimmer.
+
 ## 2026-05-24
 
 ### Deployed

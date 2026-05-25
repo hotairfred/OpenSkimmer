@@ -4845,7 +4845,7 @@ class SpotTracker:
         'gate_bypass_consensus':       False,  # bypass goes through freq consensus vs simple count
         'gate_scp_bucket_substitute':  False,  # emit bucket form instead of raw call
         'gate_short_scp_bucket':       True,   # suppress bucket-substitute into ≤3-char targets w/o peer corroboration (M5M class)
-        'gate_short_scp_exact':        True,   # require 2nd-sighting before emitting ≤3-char SCP via ITILA [exact] path (G5E/SE5E class) — closes the M5M-gate bypass where ITILA synth "CQ <call>" auto-sets has_context
+        'gate_short_scp_exact':        True,   # require 2nd-sighting before emitting ≤3-char SCP via ITILA [exact] path (G5E class) — closes the M5M-gate bypass where ITILA synth "CQ <call>" auto-sets has_context
         'gate_recent_band_floor':      False,  # anchor solo decode if peers saw it recently (S-floor)
         'gate_harmonic_filter':        False,  # drop 2x-5x harmonic spurs of same-call recent spots
         'enable_caller_spotting':      True,   # extract callers AND runner from QSO buffer (c042491)
