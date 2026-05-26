@@ -1,0 +1,45 @@
+[Unit]
+Description=SparkGap CW/FT8 skimmer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sparkgap
+Group=sparkgap
+WorkingDirectory=/home/sparkgap/csdr-skimmer
+
+# MQTT broker for FT8-spot pipeline (sparkgap → pskr_feeder).
+# Without these, the publisher logs "Connection refused" and gives up,
+# so FT8 spots never reach PSKReporter.
+Environment="MQTT_HOST=192.168.1.14"
+Environment="MQTT_PORT=1883"
+Environment="MQTT_USER=mqttuser"
+Environment="MQTT_PASS=mqttpass"
+
+# glibc arena fragmentation guard (see feedback_glibc_arena_fragmentation.md).
+# Required to keep RSS bounded under high bin counts (cluster=50 OOM 2026-05-25).
+Environment="MALLOC_ARENA_MAX=2"
+
+ExecStart=/usr/bin/python3 /home/sparkgap/csdr-skimmer/sparkgap.py --config sk_5band.json
+
+# Append rather than truncate so post-restart investigation has history.
+StandardOutput=append:/tmp/sparkgap.log
+StandardError=append:/tmp/sparkgap.log
+
+Restart=always
+RestartSec=5
+
+# SIGTERM clean-shutdown sometimes hangs in C dec_feed (issue #117).
+# After 20s systemd sends SIGKILL automatically.
+TimeoutStopSec=20
+
+# cgroup-enforced memory ceiling — replaces the polling watchdog
+# (tools/sparkgap_watchdog.sh).  Hitting this triggers cgroup OOM-kill,
+# Restart=always brings it back, MALLOC_ARENA_MAX=2 prevents the
+# fragmentation that drove RSS up in the first place.  11 GB headroom
+# against 14 GB total RAM on skimmer1.
+MemoryMax=11G
+
+[Install]
+WantedBy=multi-user.target

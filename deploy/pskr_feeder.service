@@ -1,0 +1,28 @@
+[Unit]
+Description=PSKReporter feeder for SparkGap FT8 spots
+After=network-online.target sparkgap.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sparkgap
+Group=sparkgap
+WorkingDirectory=/home/sparkgap/csdr-skimmer
+
+# Same broker as sparkgap.service (consumes skimmer/ft8/raw, forwards
+# to report.pskreporter.info:4739 via IPFIX UDP).
+Environment="MQTT_HOST=192.168.1.14"
+Environment="MQTT_PORT=1883"
+Environment="MQTT_USER=mqttuser"
+Environment="MQTT_PASS=mqttpass"
+
+ExecStart=/usr/bin/python3 /home/sparkgap/csdr-skimmer/pskr_feeder.py --call WF8Z --grid EM79SM
+
+StandardOutput=append:/tmp/pskr_feeder.log
+StandardError=append:/tmp/pskr_feeder.log
+
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
