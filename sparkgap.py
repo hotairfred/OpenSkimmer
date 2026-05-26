@@ -1319,6 +1319,34 @@ def _get_bmorse_lib():
 # libitila.so — Bayesian CW decoder (envelope in, callsigns out)
 # ---------------------------------------------------------------------------
 
+# Morse element counts: number of dahs per character.  Chars with 0 dahs
+# (E, I, S, H, 5) decode naturally from pure-dit noise streams / QRN, so
+# short callsigns composed mostly of these are highly likely to be decoder
+# hallucinations on noisy bands.  Used by _is_dit_heavy_short() to suppress
+# the SE5E / I5I / E5H / E3GEE class on the SCP-bypass emit path.
+_MORSE_DAH_COUNT = {
+    'A': 1, 'B': 1, 'C': 2, 'D': 1, 'E': 0, 'F': 1, 'G': 2,
+    'H': 0, 'I': 0, 'J': 3, 'K': 2, 'L': 1, 'M': 2, 'N': 1,
+    'O': 3, 'P': 2, 'Q': 3, 'R': 1, 'S': 0, 'T': 1, 'U': 1,
+    'V': 1, 'W': 2, 'X': 2, 'Y': 3, 'Z': 2,
+    '0': 5, '1': 4, '2': 3, '3': 2, '4': 1, '5': 0,
+    '6': 1, '7': 2, '8': 3, '9': 4,
+}
+
+def _is_dit_heavy_short(call):
+    """True if call is 3-5 chars and composed primarily of 0-dah chars
+    (E, I, S, H, 5).  Real ≤5 char contest calls almost always include
+    ≥2 dah-bearing chars (K, W, N, M, 0, 1, 9 etc).  Sampling of today's
+    9 hand-blacklisted hallucinations (E5H, I5I, E5ET, SE5E, SE5I, EU4U,
+    EA5S, SE4E, E3GEE) shows 7/9 match this predicate.  Applied only on
+    the SCP-bypass emit path (CALL_RE-valid but NOT in MASTER.SCP) where
+    noise probability is highest.  H8N and EU4U escape — kept on
+    per-call blacklist."""
+    if not (3 <= len(call) <= 5):
+        return False
+    n_all_dit = sum(1 for c in call if _MORSE_DAH_COUNT.get(c, 1) == 0)
+    return n_all_dit >= 3
+
 _ITILA_CQ_WORDS = {'CQ', 'TEST', 'CWT', 'SST', 'MST', 'FD', 'SS', 'NA', 'UP'}
 # QRZ/QRL deliberately NOT runner anchors. After a QSO the runner sends
 # "TU CALL 5NN QRZ?" and the next decode chunk often starts with the next
@@ -4855,6 +4883,7 @@ class SpotTracker:
         'gate_scp_bucket_substitute':  False,  # emit bucket form instead of raw call
         'gate_short_scp_bucket':       True,   # suppress bucket-substitute into ≤3-char targets w/o peer corroboration (M5M class)
         'gate_short_scp_exact':        True,   # require 2nd-sighting before emitting ≤3-char SCP via ITILA [exact] path (G5E class) — closes the M5M-gate bypass where ITILA synth "CQ <call>" auto-sets has_context
+        'gate_dit_heavy_bypass':       True,   # hard-suppress 3-5 char dit-heavy calls (≥3 of {E,I,S,H,5}) on SCP-bypass [unverified] path; catches E5H/I5I/E5ET/E3GEE class
         'gate_recent_band_floor':      False,  # anchor solo decode if peers saw it recently (S-floor)
         'gate_harmonic_filter':        False,  # drop 2x-5x harmonic spurs of same-call recent spots
         'enable_caller_spotting':      True,   # extract callers AND runner from QSO buffer (c042491)
@@ -6087,6 +6116,20 @@ class SpotTracker:
                 # threshold, tag with patt3ch result for downstream visibility.
                 seen_p1.add(call)  # dedupe within this process() call
                 if wpm > self.MAX_WPM:
+                    continue
+                # gate_dit_heavy_bypass: hard-suppress 3-5 char calls composed
+                # mostly of 0-dah chars on the bypass path (not in MASTER.SCP).
+                # These are overwhelmingly noise/QRN hallucinations — the
+                # decoder's beam search snaps onto E/I/S/H/5 chars when the
+                # signal envelope is dominated by a quasi-periodic dit-rate
+                # carrier. Real ≤5 char calls with this composition are rare
+                # and almost always already in SCP (would go through [exact]
+                # or bucket path instead).
+                if (self.gate_config.get('gate_dit_heavy_bypass', True)
+                        and _is_dit_heavy_short(call)):
+                    if self.gate_config['gate_telemetry']:
+                        log.info("BYPASS suppress (dit-heavy-short): %s @ %.1f kHz",
+                                 call, freq_khz)
                     continue
                 patt3ch_match = self._matches_patt3ch(call)  # 'active' / 'rare' / None
                 if self.gate_config['gate_patt3ch_filter'] and patt3ch_match is None:

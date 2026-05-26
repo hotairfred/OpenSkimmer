@@ -178,3 +178,20 @@ EU4U
 #         underlying signal is more plausibly an SE-prefix Swedish call.
 E5H
 H8N
+
+#   E3GEE: 5-char hallucination on 40m (7017.1) via scp_bypass_threshold=2
+#         path 2026-05-26 03:11Z.  3 of 5 chars are 0-dah (E,E,E).  Caught
+#         by gate_dit_heavy_bypass going forward; blacklist entry kept
+#         as belt-and-suspenders.
+#
+#   EA5S, SE4E: 4-char dit-heavy SCP-bucket-substitute targets.  EA5S
+#         observed 23:03Z (7068.4 bucket from ET5S/EI5S) and SE4E observed
+#         multiple windows 23:30Z onwards (bucket SI4E/UE4E/IE4E + SCP-
+#         correct path).  Both legit SCP entries (Spanish/Swedish) so
+#         not caught by dit-heavy filter (which is bypass-path only).
+#         Blacklist suppresses our hallucinated emits without affecting
+#         the real operators (we just won't be a spotter for them; RBN
+#         distributed network catches them).
+E3GEE
+EA5S
+SE4E
