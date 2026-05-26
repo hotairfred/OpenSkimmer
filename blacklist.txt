@@ -159,3 +159,22 @@ SE5I
 #         output paths).  Same class as SE5I.
 E5ET
 EU4U
+
+#   E5H:  3-char pure dit hallucination (E=· 5=····· H=···· → 10 dits).
+#         NOT in MASTER.SCP — emitted via scp_bypass_threshold=2 path as
+#         [unverified].  Observed 2026-05-26 02:57Z on 7040.0 kHz.  Raw
+#         text was pure E/5/H/S/I noise stream (sample: "E5I5EIIS55HIES?II
+#         E?SIESE?BEEEH").  Same path as I5I / E5ET.  Multiple cost=999
+#         decodes preceded the eventual emit at lower cost.
+#
+#   H8N:  3-char dit-heavy (H=···· 8=───·· N=─· → 6 dits + 4 dahs).  NOT
+#         in MASTER.SCP — emitted via scp_bypass_threshold=2 path with
+#         patt3ch=active (matches a known structural pattern).  Observed
+#         2026-05-26 02:55Z on 14023.0 kHz.  Decoder also produced SE8N
+#         from the same window (4th decode → SE8X via bucket-substitute),
+#         showing classic lead-element ambiguity between H(····) and
+#         SE(··· + ·) — same family as SE5E/SE5I hallucinations.  Raw text
+#         contained contest-exchange fragments "I H8N 58N IN" but the
+#         underlying signal is more plausibly an SE-prefix Swedish call.
+E5H
+H8N
