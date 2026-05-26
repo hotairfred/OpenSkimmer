@@ -152,13 +152,16 @@ SE5I
 #         path as [unverified].  Observed 2026-05-25 21:57Z on 10100.6 kHz
 #         (30m), raw decode text was pure E/T/I/A noise.  Same path as I5I.
 #
-#   EU4U: 4-char SCP-bucket target (E=· U=··─ 4=····─ U=··─).  IN MASTER.SCP.
-#         Hit via gate_scp_bucket_substitute path: ES4U raw → edit-1 → EU4U.
-#         Observed 2026-05-25 21:56Z on 10100.5 kHz (30m), 50 Hz away from
-#         the simultaneous E5ET emit (same noise source, different decoder
-#         output paths).  Same class as SE5I.
+#   EU4U: REMOVED FROM BLACKLIST 2026-05-26 12:15Z.  Originally added
+#         2026-05-25 21:56Z thinking the SCP-bucket-substitute hit on
+#         10100.5 kHz CW (raw "ES4U" → bucket → EU4U) was a hallucination.
+#         But 8h post-deploy audit found 3 distinct FT8 QSOs at 14076.6
+#         hearing EU4U: "DL8WEM EU4U RR73", "EU4U W7RR CN85", "EU4U G7IGN
+#         R+00" — legitimate real Belarus operator.  The 30m CW hit was
+#         probably a brief real EU4U operation that our SCP-bucket path
+#         slightly mis-anchored.  Structural fix for the SCP-bucket
+#         lead-element mis-decode is task #120.
 E5ET
-EU4U
 
 #   E5H:  3-char pure dit hallucination (E=· 5=····· H=···· → 10 dits).
 #         NOT in MASTER.SCP — emitted via scp_bypass_threshold=2 path as
