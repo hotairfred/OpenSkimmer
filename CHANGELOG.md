@@ -2,6 +2,33 @@
 
 Pre-1.0 alpha. No versioned releases yet — entries are dated.
 
+## 2026-05-30
+
+### Fixed (production-critical, mid-WPX)
+- **Dead skimmer after storm power-cycle — Pitaya DHCP IP moved .54 → .25.**
+  Found skimmer producing 0 spots with `ring_drops=0/0` (zero denominator =
+  no HPSDR IQ arriving at all, distinct from antenna-down which still streams
+  noise). Root cause: the Red Pitaya gets a **dynamic** DHCP lease; the storm
+  power-cycle brought it back on a new IP (.25), but `sk_5band.json` dials a
+  **hardcoded `sdr_ip`** (no discovery), so sparkgap was streaming from a dead
+  address. Located the board by OUI `00:26:32` (hostname `rp-f09804`).
+  - Fix: `sdr_ip` 192.168.1.54 → **192.168.1.25**, restart → IQ restored,
+    ~170 spots/min flowing to RBN within 90s.
+  - Permanent fix: pinned the Pitaya's DHCP lease **static** on the Mikrotik
+    so it can't wander again.
+
+### Changed (tuning, learned from real WPX density)
+- **`itila_max_bins` 600 → 400 (reverted the WPX-prep bump).** The 400→600
+  bump made for WPX prep **saturated the single-threaded decoder at real
+  contest peak**: env_drops grew *super-linearly* (accelerating runaway —
+  215k→6M+ in 4 min) and RSS climbed toward the 11G OOM cap, with **no
+  spot-rate gain** over 400 (419 vs 415 spots at matched 183s uptime). At 400:
+  CPU 404%→339%, RSS 7+→6 GB, env_drops linear/steady-state (stable), `peak`
+  caps cleanly at 400. Lesson: 600 is above this 6-core box's WPX throughput;
+  the real lever for higher density is the deferred multi-thread decoder, not
+  this knob. Answers the "ill effects from 400→600" question from WPX prep —
+  yes, at true WPX density.
+
 ## 2026-05-25
 
 ### Fixed (production-critical)

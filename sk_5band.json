@@ -12,7 +12,7 @@
     "use_itila": true,
     "itila_window_sec": 60,
     "itila_ev_thresh": 1.5,
-    "sdr_ip": "192.168.1.54",
+    "sdr_ip": "192.168.1.25",
     "sdr_port": 1024,
     "sample_rate": 192000,
     "max_receivers": 8,
@@ -43,7 +43,8 @@
     "enable_ft8": true,
     "_comment_enable_rtty": "enable_rtty: independent of enable_ft8. RTTY scan piggybacks on the same minute-aligned IQ snapshot (no extra capture cost) and looks for FSK pairs in each band's RTTY-contest sub-band. Default false during WPX CW 2026-05-30/31 (Fred operating, doesn't need RTTY spots cluttering the cluster output during a CW contest). Flip back to true after contest if you want RTTY scan during non-CW-contest weekends.",
     "enable_rtty": false,
-    "itila_max_bins": 600,
+    "_comment_itila_max_bins": "Per-scanner active-bin cap. WPX-prep bumped this 400->600 (2026-05-30) to catch more contest density. REVERTED to 400 same night: at real WPX peak, 600 saturated the single-threaded decoder — env_drops grew super-linearly (accelerating runaway) and RSS climbed toward the 11G OOM cap, with NO spot-rate gain over 400 (419 vs 415 spots at matched 183s). At 400 env_drops is linear/steady-state (stable) and peak caps cleanly at 400. The real fix for higher density is the deferred multi-thread decoder, not raising this. Don't re-bump past 400 without that.",
+    "itila_max_bins": 400,
     "use_pfb_scanner": false,
 
     "_comment_ppm_offset": "Software frequency calibration. Subtracted from every reported freq. ppm_offset > 0 means our reports were running too high (Pitaya TCXO slow). W3RGA's daily analysis is the authoritative source — set to whatever ppm value SM7IUN flags us at on the latest standings. compute_ppm_skew.py is useful for sanity-checking shifts but hits a 10 Hz tee-rounding floor (~1 ppm resolution). Hardware fix is the R25/R26 SMD mod + Bodnar 125 MHz GPSDO when convenient. CRITICAL LESSON (2026-05-07): allow 24+ hours of thermal soak after any band-count or load change before chasing a W3RGA skew flag. The +5.3 ppm flagged on Day 4 was thermal transient from the 04-30 8-band switch-on; correcting against it overshot to -4.8 (Day 5). After resetting to 0.0 the steady-state drift came in at +0.1 ppm on Day 6 — same as W3RGA himself. Don't react to one day's skew; wait for thermal equilibrium.",

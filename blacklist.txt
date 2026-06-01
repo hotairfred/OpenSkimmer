@@ -198,3 +198,30 @@ H8N
 E3GEE
 EA5S
 SE4E
+
+# WPX CW 2026 mined additions (2026-06-01) — 16 calls.
+# Methodology-driven (mine_blacklist.py over a 44.5h / 8.2M-line 3-way capture:
+# our spots vs SDC tee vs worldwide RBN tee). Each: 1x1 (@#@) pattern we emitted
+# repeatedly, 0 corroboration by SDC OR worldwide RBN OR our own FT8, AND flagged
+# persistently across multiple independent mining passes. These are the "recurring
+# core" survivors of a final apply-time RBN re-check — 3 earlier candidates (N4E,
+# K0E, M5X) were dropped after they corroborated as real mid/post-contest. The
+# larger 200-call high-conf pile was NOT applied (dead-air-inflated; per-call
+# mining doesn't converge). Structural 1x1-corroboration gate (#120) is the
+# durable fix; this list is the conservative stopgap.
+E0L
+E1E
+E1T
+E3A
+E3E
+E4T
+E5A
+G7F
+I5N
+I6T
+K5N
+N1H
+N6E
+T0L
+T0T
+V0L
