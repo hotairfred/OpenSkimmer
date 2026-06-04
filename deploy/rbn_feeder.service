@@ -1,0 +1,27 @@
+[Unit]
+Description=RBN spot forwarder for SparkGap (Aggregator-6.7 protocol)
+After=network-online.target sparkgap.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sparkgap
+Group=sparkgap
+WorkingDirectory=/home/sparkgap/csdr-skimmer
+
+# Reads sparkgaps RAW local cluster telnet (:7300) and uploads to RBN.
+# Applies blacklist.txt (currently 102) at the upload boundary as garbage
+# suppression. Feeds RAW otherwise (per feedback_rbn_raw_upstream) — NOT
+# routed through GoCluster.
+ExecStart=/usr/bin/python3 /home/sparkgap/csdr-skimmer/rbn_feeder.py \
+  --call WF8Z --grid EM79SM \
+  --local-host 192.168.1.76 --local-port 7300 \
+  --blacklist /home/sparkgap/csdr-skimmer/blacklist.txt
+
+StandardOutput=append:/tmp/rbn_feeder.log
+StandardError=append:/tmp/rbn_feeder.log
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
