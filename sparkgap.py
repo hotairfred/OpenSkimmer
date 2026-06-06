@@ -5017,9 +5017,11 @@ class SpotTracker:
     SIGHTING_WINDOW = 60.0
 
     # WPM cap — spots with decoder WPM above this are suppressed as noise.
-    # Contest CW tops out ~40-45 WPM; anything above 50 is almost certainly
-    # a decoder artifact from noise or digital mode interference.
-    MAX_WPM = 50
+    # Contest CW tops out ~40-45 WPM; anything above ~45 is almost certainly
+    # a decoder artifact from noise/digital interference — or a mis-decode
+    # snapping a fragment onto a real SCP call (the 49 WPM "W5RE" operator
+    # report, 2026-06-06, which slipped the old 50 ceiling).
+    MAX_WPM = 45
 
     # Total dit+dah count per character — low-weight chars are easy to
     # generate from noise; high-weight chars require longer, distinctive patterns.
