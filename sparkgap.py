@@ -1462,6 +1462,14 @@ def _itila_extract_cq_call(text, valid_calls=None):
         if len(tok) < 2 or len(tok) > 5:
             return False
         for cq in _FUZZY_CQ:
+            # Fuzzy (1-char) matching ONLY for CQ words >=3 chars. A single
+            # substitution on a 2-char word is far too loose — ubiquitous
+            # ragchew/exchange tokens fire it and spot non-CQ stations mid-QSO:
+            # FB->FD, GA->NA, ES->SS, UR->UP (K5TR report 2026-06-07, where
+            # "FB JIM N3BB DE N5RZ" spotted N3BB/N5RZ as CQers). 2-char triggers
+            # must match exactly — already handled above via _ITILA_CQ_WORDS.
+            if len(cq) < 3:
+                continue
             if len(tok) == len(cq):
                 diffs = [(a, b) for a, b in zip(tok, cq) if a != b]
                 if len(diffs) == 1 and diffs[0][0].isalpha() == diffs[0][1].isalpha():

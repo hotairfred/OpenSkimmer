@@ -51,8 +51,8 @@
     "ppm_offset": 0.0,
 
     "_comment_gates": "Gate flags — defaults shown are 'ship-it' mode (permissive emit, trust cluster filtering). Each gate is a feature you can re-enable individually for stricter local behavior. See feedback_ship_it_plan.md for rationale.",
-    "enable_caller_spotting":      true,
-    "gate_cq_runner":              false,
+    "enable_caller_spotting":      false,
+    "gate_cq_runner":              true,
     "gate_freq_consensus":         false,
     "gate_patt3ch_filter":         false,
     "gate_bypass_consensus":       true,
