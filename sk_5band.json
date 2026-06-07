@@ -55,7 +55,7 @@
     "gate_cq_runner":              false,
     "gate_freq_consensus":         false,
     "gate_patt3ch_filter":         false,
-    "gate_bypass_consensus":       false,
+    "gate_bypass_consensus":       true,
     "gate_scp_bucket_substitute":  true,
     "gate_recent_band_floor":      false,
     "gate_harmonic_filter":        false,
