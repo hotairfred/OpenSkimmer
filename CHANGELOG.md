@@ -2,6 +2,36 @@
 
 Pre-1.0 alpha. No versioned releases yet — entries are dated.
 
+## 2026-06-14
+
+### Added (spot-quality — kills HamAlert-magnet ghosts)
+- **`gate_rare_dxcc_bypass` (default on): rare-DXCC prefix gate on the
+  SCP-bypass `[unverified]` path.** A bypass spot whose prefix is a rare/
+  most-wanted DXCC entity (T5/Somalia, S7/Seychelles, E3/Eritrea, 3Y, P5,
+  FT5, KH1…) is suppressed: real activity from those entities is always
+  SCP-listed and arrives via `[exact]`, so a *non-SCP* bypass match is a
+  decoder ghost — and DXers run HamAlert on exactly those prefixes, so a
+  fabricated one generates loud public false alarms (N6TA's T5 report).
+  - **Why deterministic, not just consensus:** `gate_bypass_consensus` is
+    probabilistic — in a quiet window a ghost can *win its frequency* and slip
+    through. `T5F` and `S7J` leaked `[unverified]` in production 06-10→14
+    despite consensus. The prefix gate blocks on the prefix regardless of
+    freq-winner status. Skipped for SCP-corrected (`forced_bypass`) calls.
+  - Prefix match is `startswith` over a curated unambiguous list
+    (`_RARE_DXCC_PREFIXES`); ITU allocation keeps it collision-free — common
+    entities (KH6/KP4/VK1-8/3D2-Fiji/S5/E7/A6) deliberately excluded.
+  - **Validation:** unit-tested incl. near-collisions (S50A/E73A/A65/T88 all
+    pass through); B1_seg2 recall **unchanged 49/56** with the gate firing 5×
+    (E3FP, T5T, T5TU, and a `T5RZ/M` that's a mangled `N5RZ` — the real N5RZ
+    still spotted `[exact]`). On clean US traffic it's defense-in-depth (no
+    output change); its value is the deterministic backstop for the live leak.
+
+### Verified (production audit, post-fix)
+- Confirmed the 06-07 spot-quality fixes work in live production (06-10→14
+  segment): **T5/Somalia ghosts 387→1**, **WPM hard-capped at 45** (was
+  46–50 pre-fix). Residual `[unverified]` junk (11%) clusters into trailing-dit
+  hallucinations (#119/#120) + rare-DXCC ghosts (now closed by the gate above).
+
 ## 2026-05-30
 
 ### Fixed (production-critical, mid-WPX)
