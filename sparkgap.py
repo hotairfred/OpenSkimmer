@@ -1347,6 +1347,49 @@ def _is_dit_heavy_short(call):
     n_all_dit = sum(1 for c in call if _MORSE_DAH_COUNT.get(c, 1) == 0)
     return n_all_dit >= 3
 
+# Rare / "most-wanted" DXCC callsign prefixes.  A bypass [unverified] spot whose
+# prefix matches one of these is almost certainly a decoder ghost: real activity
+# from these entities is rare and always announced, so it's already in MASTER.SCP
+# and arrives via the [exact] path — NOT via bypass.  DXers run HamAlert on
+# exactly these prefixes, so a fabricated one generates loud public false alarms
+# (N6TA's T5/Somalia report 2026-06-05; T5F/S7J still leaked [unverified] as of
+# 2026-06-14).  Gating bypass on these has ~zero recall cost: a genuine new one
+# is still caught by other RBN skimmers and lands in SCP within days.  Prefixes
+# are matched by startswith; ITU allocation makes them unambiguous (the common
+# entities KH6/KP4/VK1-8/3D2-Fiji/F-France are deliberately NOT here — only the
+# rare KH/KP/VK0/FT5 variants).  See feedback_bypass_consensus_gate.
+_RARE_DXCC_PREFIXES = (
+    'P5',                                  # North Korea
+    '3Y',                                  # Bouvet / Peter I
+    'BS7', 'BV9P',                         # Scarborough Reef / Pratas
+    'KH1', 'KH4', 'KH5', 'KH7K', 'KH9',    # Baker-Howland/Midway/Palmyra/Kure/Wake
+    'KP1', 'KP5',                          # Navassa / Desecheo
+    'FT5',                                 # French Sub-Antarctic
+    'VK0',                                 # Heard / Macquarie
+    'ZL9',                                 # NZ Subantarctic
+    'ZS8',                                 # Marion
+    'ZD9',                                 # Tristan da Cunha / Gough
+    '3C0',                                 # Annobón
+    'T5', '6O',                            # Somalia
+    '7O',                                  # Yemen
+    'E3',                                  # Eritrea
+    'E4',                                  # Palestine
+    'S0',                                  # Western Sahara
+    'S7',                                  # Seychelles
+    'A5',                                  # Bhutan
+    'D6',                                  # Comoros
+    '5A',                                  # Libya
+    'T31', 'T32', 'T33',                   # Kiribati (Central/East/Banaba)
+    '1A', '1S',                            # SMOM / Spratly
+    'CE0X',                                # San Felix
+)
+
+def _is_rare_dxcc_prefix(call, prefixes=_RARE_DXCC_PREFIXES):
+    """True if `call` begins with a rare-DXCC prefix (see _RARE_DXCC_PREFIXES)."""
+    if not call:
+        return False
+    return any(call.startswith(p) for p in prefixes)
+
 _ITILA_CQ_WORDS = {'CQ', 'TEST', 'CWT', 'SST', 'MST', 'FD', 'SS', 'NA', 'UP'}
 # QRZ/QRL deliberately NOT runner anchors. After a QSO the runner sends
 # "TU CALL 5NN QRZ?" and the next decode chunk often starts with the next
@@ -4892,6 +4935,7 @@ class SpotTracker:
         'gate_short_scp_bucket':       True,   # suppress bucket-substitute into ≤3-char targets w/o peer corroboration (M5M class)
         'gate_short_scp_exact':        True,   # require 2nd-sighting before emitting ≤3-char SCP via ITILA [exact] path (G5E class) — closes the M5M-gate bypass where ITILA synth "CQ <call>" auto-sets has_context
         'gate_dit_heavy_bypass':       True,   # hard-suppress 3-5 char dit-heavy calls (≥3 of {E,I,S,H,5}) on SCP-bypass [unverified] path; catches E5H/I5I/E5ET/E3GEE class
+        'gate_rare_dxcc_bypass':       True,   # suppress SCP-bypass [unverified] spots with a rare/most-wanted DXCC prefix (T5/S7/E3/3Y...); real ones are SCP-listed → [exact]. Kills HamAlert-magnet ghosts (N6TA T5 report)
         'gate_recent_band_floor':      False,  # anchor solo decode if peers saw it recently (S-floor)
         'gate_harmonic_filter':        False,  # drop 2x-5x harmonic spurs of same-call recent spots
         'enable_caller_spotting':      True,   # extract callers AND runner from QSO buffer (c042491)
@@ -6139,6 +6183,18 @@ class SpotTracker:
                         and _is_dit_heavy_short(call)):
                     if self.gate_config['gate_telemetry']:
                         log.info("BYPASS suppress (dit-heavy-short): %s @ %.1f kHz",
+                                 call, freq_khz)
+                    continue
+                # gate_rare_dxcc_bypass: suppress bypass [unverified] spots whose
+                # prefix is a rare/most-wanted DXCC entity.  Real activity there is
+                # always SCP-listed (→ [exact] path), so a non-SCP bypass match is
+                # a ghost — and these prefixes are HamAlert magnets (T5/Somalia,
+                # N6TA report).  Skipped for SCP-corrected (forced_bypass) calls,
+                # which are SCP-backed.  See feedback_bypass_consensus_gate.
+                if (self.gate_config.get('gate_rare_dxcc_bypass', True)
+                        and not forced_bypass and _is_rare_dxcc_prefix(call)):
+                    if self.gate_config['gate_telemetry']:
+                        log.info("BYPASS suppress (rare-DXCC prefix): %s @ %.1f kHz",
                                  call, freq_khz)
                     continue
                 patt3ch_match = self._matches_patt3ch(call)  # 'active' / 'rare' / None
