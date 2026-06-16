@@ -5073,7 +5073,11 @@ class SpotTracker:
     # a decoder artifact from noise/digital interference — or a mis-decode
     # snapping a fragment onto a real SCP call (the 49 WPM "W5RE" operator
     # report, 2026-06-06, which slipped the old 50 ceiling).
-    MAX_WPM = 45
+    MAX_WPM = 40   # 45->40 (2026-06-16, WF8Z): tighter noise guard. Legit contest
+                   # CW tops ~40; >40 is almost always decoder frenzy / mis-decode
+                   # (the 49 WPM "W5RE" ghost). DK3QN 2009 dense-contest maxes at
+                   # exactly 40, and the gate is strict `> MAX_WPM`, so 40 still
+                   # spots — no legit recall lost. May ratchet lower later.
 
     # Total dit+dah count per character — low-weight chars are easy to
     # generate from noise; high-weight chars require longer, distinctive patterns.
@@ -6043,10 +6047,9 @@ class SpotTracker:
             if call in self.blacklist:
                 continue
 
-            # Global WPM sanity gate.  MAX_WPM=50 is defined as a constant
-            # documenting "spots above this are almost certainly noise" but
-            # was never actually enforced — wire it in here.  Contest CW
-            # tops out around 40-45 WPM in practice; 50+ is decoder frenzy.
+            # Global WPM sanity gate.  Contest CW tops out around 40 WPM in
+            # practice; faster is almost always decoder frenzy / a mis-decode
+            # snapping noise onto a real call.  MAX_WPM=40 (see constant).
             if wpm > self.MAX_WPM:
                 continue
             if call in self.valid_calls and not forced_bypass:
