@@ -2,6 +2,23 @@
 
 Pre-1.0 alpha. No versioned releases yet — entries are dated.
 
+## 2026-06-18
+
+### Changed (spot-quality — op report "happens constantly")
+- **rare-DXCC gate expanded 33 → 83 prefixes** (commit 18c4216, deployed). Live
+  trigger: H4I/Solomon leaking `[unverified]` to RBN at 14029.9 with zero RBN
+  corroboration (raw = dit-heavy noise mush). Hand-picked list was whack-a-mole;
+  expanded to cover genuinely-rare/most-wanted Pacific/Africa/Asia entities.
+  Validated collision-free vs MASTER.SCP + add_calls (dropped TT — collides with
+  curated TT8A). Semi-active entities (VP8/VP2/3W/XV/FK/FO/KH8/D4) deliberately
+  excluded — real ones are SCP-listed → [exact], unaffected.
+- **DIAGNOSTIC (recorded so we don't mis-target):** the BULK of the constant
+  `[unverified]` junk is NOT rare-DXCC — it's short-call + trailing-variant
+  hallucination (W6T/N8G/K3EST/W8WV-vs-W8WVA class) on the bypass path. That's
+  #119/#120, a separate fix that must thread the needle on legit 1x1 contest
+  calls. The rare-DXCC gate only kills the HamAlert-magnet *visible* subset.
+
+
 ## 2026-06-14
 
 ### Added (spot-quality — kills HamAlert-magnet ghosts)
