@@ -1359,29 +1359,26 @@ def _is_dit_heavy_short(call):
 # entities KH6/KP4/VK1-8/3D2-Fiji/F-France are deliberately NOT here — only the
 # rare KH/KP/VK0/FT5 variants).  See feedback_bypass_consensus_gate.
 _RARE_DXCC_PREFIXES = (
-    'P5',                                  # North Korea
-    '3Y',                                  # Bouvet / Peter I
-    'BS7', 'BV9P',                         # Scarborough Reef / Pratas
-    'KH1', 'KH4', 'KH5', 'KH7K', 'KH9',    # Baker-Howland/Midway/Palmyra/Kure/Wake
-    'KP1', 'KP5',                          # Navassa / Desecheo
-    'FT5',                                 # French Sub-Antarctic
-    'VK0',                                 # Heard / Macquarie
-    'ZL9',                                 # NZ Subantarctic
-    'ZS8',                                 # Marion
-    'ZD9',                                 # Tristan da Cunha / Gough
-    '3C0',                                 # Annobón
-    'T5', '6O',                            # Somalia
-    '7O',                                  # Yemen
-    'E3',                                  # Eritrea
-    'E4',                                  # Palestine
-    'S0',                                  # Western Sahara
-    'S7',                                  # Seychelles
-    'A5',                                  # Bhutan
-    'D6',                                  # Comoros
-    '5A',                                  # Libya
-    'T31', 'T32', 'T33',                   # Kiribati (Central/East/Banaba)
-    '1A', '1S',                            # SMOM / Spratly
-    'CE0X',                                # San Felix
+    # Expanded 2026-06-21 (WF8Z: "this happens constantly" — H4I/Solomon + TI9
+    # leaking [unverified] to RBN with zero RBN corroboration). Validated
+    # collision-free vs MASTER.SCP and add_calls. Semi-active entities deliberately
+    # EXCLUDED (VP8 Falklands, VP2 Caribbean, 3W/XV Vietnam, FK/FO Pacific-tourist,
+    # KH8 Samoa, D4 Cape Verde) — a casual non-SCP op there could be real; this
+    # list is only genuinely-rare/most-wanted where a non-SCP bypass call is
+    # ~always a ghost (a real one is SCP-listed -> [exact], unaffected).
+    # --- Most-wanted / Atlantic / Antarctic ---
+    'P5', '3Y', 'BS7', 'BV9P', 'KP1', 'KP5', 'CE0X', 'CE0Y', 'CE0Z',
+    'FT5', 'ZS8', 'ZD8', 'ZD9',
+    # --- Pacific (rare) ---
+    'KH1', 'KH3', 'KH4', 'KH5', 'KH7K', 'KH9', 'VK0', 'ZL8', 'ZL9',
+    'ZK1', 'ZK2', 'ZK3', 'H4', 'H40', 'C2', 'T2', 'T30', 'T31', 'T32', 'T33',
+    'E5', 'E6', 'V6', 'V7', '5W', 'A3', 'TX', 'FW', 'VP6',
+    # --- Africa (rare) ---
+    '3C', '3C0', '3B6', '3B7', '3B9', 'D2', 'D6', '5A', '5R', '5T', '5U', '5V',
+    '9L', '9Q', '9U', '9X', 'TN', 'TL', 'TJ', 'TR', 'ST', 'Z8', 'J2',
+    'S0', 'S7', 'S9', '6O', 'T5', '7O', 'E3', 'E4',
+    # --- Asia / Middle East ---
+    '1A', '1S', '9M0', 'A5', 'XU', 'XW', 'XX9', 'XY', 'XZ', 'TI9',
 )
 
 def _is_rare_dxcc_prefix(call, prefixes=_RARE_DXCC_PREFIXES):
