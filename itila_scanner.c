@@ -51,7 +51,7 @@ typedef struct {
     int    active;
     double c_phase, s_phase;           /* oscillator state */
 
-    /* FIR stage 1: 192k→12k (32 taps, complex I/Q) */
+    /* FIR stage 1: 192k→12k (95 taps, complex I/Q) */
     double dl1_i[FIR_STAGE1_LEN];
     double dl1_q[FIR_STAGE1_LEN];
     int    dl1_count;                  /* samples fed since last output */
@@ -120,6 +120,7 @@ struct ItilaSc {
     uint64_t bins_at_max;        /* peak active bin count */
     uint64_t spawn_gated;        /* candidates rejected (insufficient hits) */
     uint64_t spawn_promoted;     /* candidates that became bins */
+    uint64_t decode_window_seq;  /* unique across bin eviction/recreation */
 
     /* Lazy spawn candidate ring — see SC_MAX_CANDIDATES comment block */
     int      scan_counter;
@@ -144,6 +145,33 @@ struct ItilaSc {
 };
 
 static void bin_free_decoders(ItilaSc *sc, ScBin *b);
+
+static void envelope_signature(const double *env, int n, float *out)
+{
+    double mean = 0.0;
+    for (int j = 0; j < ITILA_SC_SIGNATURE_LEN; j++) {
+        int lo = (int)(((int64_t)j * n) / ITILA_SC_SIGNATURE_LEN);
+        int hi = (int)(((int64_t)(j + 1) * n) / ITILA_SC_SIGNATURE_LEN);
+        if (hi <= lo) hi = lo + 1;
+        double sum = 0.0;
+        for (int i = lo; i < hi && i < n; i++) sum += env[i];
+        out[j] = (float)(sum / (double)(hi - lo));
+        mean += out[j];
+    }
+    mean /= ITILA_SC_SIGNATURE_LEN;
+    double variance = 0.0;
+    for (int j = 0; j < ITILA_SC_SIGNATURE_LEN; j++) {
+        double d = out[j] - mean;
+        variance += d * d;
+    }
+    double scale = sqrt(variance / ITILA_SC_SIGNATURE_LEN);
+    if (scale < 1e-20) {
+        memset(out, 0, ITILA_SC_SIGNATURE_LEN * sizeof(float));
+        return;
+    }
+    for (int j = 0; j < ITILA_SC_SIGNATURE_LEN; j++)
+        out[j] = (float)((out[j] - mean) / scale);
+}
 
 /* ---- FFT (Cooley-Tukey in-place, power-of-2, forward) ---- */
 static void fft_forward(double *re, double *im, int n)
@@ -740,6 +768,39 @@ int itila_sc_list_bin_ages(ItilaSc *sc, int *ages_out, int max_out)
     return count;
 }
 
+int itila_sc_add_probe_bin(ItilaSc *sc, double f_hz)
+{
+    if (!sc || f_hz < sc->band_min_hz || f_hz > sc->band_max_hz) return 0;
+    pthread_mutex_lock(&sc->lock);
+    for (int i = 0; i < SC_MAX_BINS; i++) {
+        if (sc->bins[i].active && fabs(sc->bins[i].f_hz - f_hz) < 1.0) {
+            pthread_mutex_unlock(&sc->lock);
+            return 1;
+        }
+    }
+    if (sc->n_bins >= sc->max_bins) {
+        pthread_mutex_unlock(&sc->lock);
+        return 0;
+    }
+    for (int i = 0; i < SC_MAX_BINS; i++) {
+        if (!sc->bins[i].active) {
+            ScBin *b = &sc->bins[i];
+            memset(b, 0, sizeof(*b));
+            b->f_hz = f_hz;
+            b->active = 1;
+            b->c_phase = 1.0;
+            b->s_phase = 0.0;
+            b->created_sample = sc->total_samples;
+            sc->n_bins++;
+            if (sc->n_bins > (int)sc->bins_at_max) sc->bins_at_max = sc->n_bins;
+            pthread_mutex_unlock(&sc->lock);
+            return 1;
+        }
+    }
+    pthread_mutex_unlock(&sc->lock);
+    return 0;
+}
+
 /* ---- integrated decode: ready check + drain + itila_feed in C ---- */
 
 void itila_sc_set_decoder(ItilaSc *sc,
@@ -771,7 +832,16 @@ typedef struct {
     int    _pad;     /* keep 8-byte alignment for the trailing double */
     char   text[256];
     double cost;     /* timing-cost confidence; 999.0 if no API available */
+    uint64_t window_id;
+    int    path_hz;
+    int    signature_n;
+    float  envelope_signature[ITILA_SC_SIGNATURE_LEN];
 } ScDecodeResult;
+
+_Static_assert(sizeof(ScDecodeResult) == ITILA_SC_RESULT_SIZE,
+               "ScDecodeResult ABI size mismatch");
+
+int itila_sc_result_size(void) { return (int)sizeof(ScDecodeResult); }
 
 int itila_sc_decode_ready(ItilaSc *sc, int window_samples,
                            ScDecodeResult *results, int max_results) {
@@ -810,6 +880,7 @@ int itila_sc_decode_ready(ItilaSc *sc, int window_samples,
             double f_hz_local = b->f_hz;
             double f_khz = f_hz_local / 1000.0;
             void *handles[2] = { b->h100, b->h200 };
+            uint64_t window_id = ++sc->decode_window_seq;
 
             /* Mark bin in-decode so the eviction sites in feed_iq won't
              * free our captured handles during the unlock window. */
@@ -853,6 +924,11 @@ int itila_sc_decode_ready(ItilaSc *sc, int window_samples,
                     r->wpm  = wpm;
                     r->_pad = 0;
                     r->cost = cost;
+                    r->window_id = window_id;
+                    r->path_hz = (p == 0) ? 100 : 200;
+                    r->signature_n = ITILA_SC_SIGNATURE_LEN;
+                    envelope_signature(env_local, window_samples,
+                                       r->envelope_signature);
                     int len = strlen(raw);
                     if (len > 255) len = 255;
                     memcpy(r->text, raw, len);

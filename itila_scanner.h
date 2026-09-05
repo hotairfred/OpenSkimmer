@@ -15,6 +15,10 @@ extern "C" {
 
 typedef struct ItilaSc ItilaSc;
 
+#define ITILA_SC_SIGNATURE_LEN 256
+#define ITILA_SC_RESULT_SIZE 1328
+int itila_sc_result_size(void);
+
 /*
  * Create scanner.
  *   sample_rate    — input IQ rate (typically 192000)
@@ -60,6 +64,8 @@ int itila_sc_ready_bins(ItilaSc *sc, double *f_hz_out, int max_out);
  */
 int itila_sc_drain_env(ItilaSc *sc, double f_hz,
                         double *env100_out, double *env200_out, int max_n);
+int itila_sc_peek_env(ItilaSc *sc, double f_hz,
+                       double *env100_out, double *env200_out, int max_n);
 
 /* Mark a bin as having produced evidence (call after itila_feed returns non-empty). */
 void itila_sc_mark_evidence(ItilaSc *sc, double f_hz);
@@ -91,6 +97,11 @@ int itila_sc_list_bins(ItilaSc *sc, double *f_hz_out, int max_out);
  * Pathological: long tail past the eviction threshold.
  */
 int itila_sc_list_bin_ages(ItilaSc *sc, int *ages_out, int max_out);
+
+/* Diagnostic channel probe.  Adds a channel at an exact frequency without
+ * waiting for the FFT spawn detector.  Intended for recorded-IQ validation
+ * and operator diagnostics; normal live operation never calls it. */
+int itila_sc_add_probe_bin(ItilaSc *sc, double f_hz);
 
 #ifdef __cplusplus
 }

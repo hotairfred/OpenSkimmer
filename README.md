@@ -293,7 +293,7 @@ re-enabled individually for stricter local behavior:
 |---|---|---|
 | `enable_caller_spotting` | `true`  | Extract callers AND runner from QSO context (high-recall mode) |
 | `gate_cq_runner` | `false` | Forces runner-only when CQ is in buffer (lower recall, higher precision) |
-| `gate_freq_consensus` | `false` | Per-freq adaptive consensus + 5-min commit lock |
+| `gate_freq_consensus` | `false` | Additional per-freq winner/commit lock after mandatory ITILA window consensus |
 | `gate_patt3ch_filter` | `false` | Reject bypass calls not matching SkimSrv's `patt3ch.lst` patterns |
 | `gate_bypass_consensus` | `false` | Bypass calls go through freq consensus vs simple count threshold |
 | `gate_scp_bucket_substitute` | `true`  | Emit nearest-SCP bucket form instead of raw decoded call |
@@ -306,6 +306,9 @@ re-enabled individually for stricter local behavior:
 Plus the standard knobs:
 
 - `signal_min_snr` — bin spawn threshold (default 12 dB; lower = more weak DX, more CPU)
+- `itila_min_consensus_windows` — independent same-bin decoder windows required
+  before any ITILA candidate can emit (minimum and default `2`; the two filter
+  paths over one IQ window count once)
 - `itila_max_bins` — concurrent bin ceiling per band (`sk_5band.json` ships at 400; 200 is conservative)
 - `scp_bypass_threshold` — sightings required for non-SCP-validated calls
 - `enable_ft8` — runs FT8 + RTTY pipelines (RTTY currently piggy-backs)
@@ -330,6 +333,11 @@ Accepts 16-bit and 24-bit stereo IQ WAV files at 192 kHz.
 - `SIGUSR1` to a running `sparkgap.py` instance dumps the current
   per-band IQ buffer to `/tmp/diag_<band>_<HHMMSS>.wav` for offline
   replay (requires `enable_ft8: true` — taps the FT8 capture buffer).
+- With MQTT enabled, raw ITILA evidence is published to
+  `mqtt.cw_evidence_topic` (default `skimmer/cw/evidence`). It carries raw
+  decoder text, bin/window/path identity, consensus decision, and any
+  cross-frequency envelope correlation. See
+  `docs/cw_frequency_integrity.md` for the contract and interpretation.
 
 ## Development
 

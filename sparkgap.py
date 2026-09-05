@@ -46,38 +46,201 @@ from telnet_server import SpotTelnetServer
 
 log = logging.getLogger('sparkgap')
 
+ITILA_SC_SIGNATURE_LEN = 256
+ITILA_SC_RESULT_SIZE = 1328
+PROCESS_SESSION_ID = f'{int(time.time())}-{os.getpid()}'
+
+
+def _native_library(name):
+    """Resolve bundled native libraries relative to this source tree."""
+    lib_dir = os.environ.get('SPARKGAP_LIB_DIR', os.path.dirname(__file__))
+    return os.path.join(lib_dir, name)
+
 
 # ---------------------------------------------------------------------------
-# MQTT publisher for FT8 spots → pskr_feeder.py (best-effort, fail-silent).
+# MQTT publisher for accepted CW and FT8 spots (best-effort, fail-safe).
 # Spots also flow via telnet :7300 — broker outage doesn't break that path.
 # ---------------------------------------------------------------------------
 _mqtt_pub = None
 _mqtt_pub_init_failed = False
 _GRID_RE = re.compile(r'^[A-R]{2}[0-9]{2}([a-x]{2})?$')
 
-def _get_mqtt_publisher():
+
+def _band_name_for_freq_hz(freq_hz, fallback=''):
+    """Derive the amateur HF band from RF frequency.
+
+    A shared tracker can emit a pending spot while another receiver manager is
+    being drained, so the current manager name is not always the spot's band.
+    """
+    mhz = float(freq_hz) / 1_000_000.0
+    for name, low, high in (
+            ('160m', 1.8, 2.0), ('80m', 3.5, 4.0), ('40m', 7.0, 7.3),
+            ('30m', 10.1, 10.15), ('20m', 14.0, 14.35),
+            ('17m', 18.068, 18.168), ('15m', 21.0, 21.45),
+            ('12m', 24.89, 24.99), ('10m', 28.0, 29.7)):
+        if low <= mhz <= high:
+            return name
+    return fallback
+
+def _get_mqtt_publisher(config=None):
     global _mqtt_pub, _mqtt_pub_init_failed
+    config = config or {}
+    if config and not config.get('enabled', False):
+        return None
     if _mqtt_pub is not None or _mqtt_pub_init_failed:
         return _mqtt_pub
     try:
         import paho.mqtt.client as mqtt
-        host = os.environ.get('MQTT_HOST', 'localhost')
-        port = int(os.environ.get('MQTT_PORT', '1883'))
+        host = os.environ.get('MQTT_HOST', config.get('host', 'localhost'))
+        port = int(os.environ.get('MQTT_PORT', config.get('port', 1883)))
         user = os.environ.get('MQTT_USER', '')
         password = os.environ.get('MQTT_PASS', '')
         c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
-                        client_id='sparkgap-ft8-pub')
+                        client_id=config.get('client_id', 'sparkgap-pub'))
+        c.max_queued_messages_set(int(config.get('max_queued_messages', 1000)))
         if user:
             c.username_pw_set(user, password)
-        c.connect(host, port, keepalive=60)
+        # Asynchronous connect keeps SDR startup independent of broker state
+        # and lets Paho reconnect automatically if the local broker restarts.
+        c.connect_async(host, port, keepalive=60)
         c.loop_start()
         _mqtt_pub = c
-        log.info("FT8 MQTT publisher connected: %s:%d → skimmer/ft8/raw", host, port)
+        log.info("MQTT publisher configured: %s:%d", host, port)
         return c
     except Exception as e:
-        log.warning("FT8 MQTT publisher init failed (will not retry): %s", e)
+        log.warning("MQTT publisher init failed (will not retry): %s", e)
         _mqtt_pub_init_failed = True
         return None
+
+
+def _publish_mqtt_json(config, topic, payload):
+    """Queue one JSON message without allowing MQTT to affect SDR operation."""
+    pub = _get_mqtt_publisher(config)
+    if pub is None:
+        return False
+    try:
+        info = pub.publish(
+            topic,
+            json.dumps(payload, separators=(',', ':'), sort_keys=True),
+            qos=int(config.get('qos', 0)),
+            retain=bool(config.get('retain', False)),
+        )
+        # Paho returns MQTT_ERR_NO_CONN (4) when connect_async has not
+        # completed yet, but the bounded offline queue retains the message
+        # and sends it after connection. Treat both states as accepted.
+        return info.rc in (0, 4)
+    except Exception as exc:
+        log.warning("MQTT publish failed for %s: %s", topic, exc)
+        return False
+
+
+def _cw_spot_payload(spot, freq_khz, band, receiver_call, receiver_grid,
+                     timestamp=None):
+    """Return the versioned MQTT representation of an accepted CW spot."""
+    payload = {
+        'schema': 'sparkgap.spot.v1',
+        'call': spot['call'],
+        'freq_hz': int(round(freq_khz * 1000.0)),
+        'snr': int(round(spot['snr'])),
+        'wpm': int(spot.get('wpm', 0)),
+        'mode': 'CW',
+        'method': spot.get('method', 'exact'),
+        'band': _band_name_for_freq_hz(freq_khz * 1000.0, band),
+        'receiver_call': receiver_call,
+        'receiver_grid': receiver_grid,
+        'ts': int(time.time() if timestamp is None else timestamp),
+    }
+    for key in ('session_id', 'evidence_id', 'bin_id', 'window_id', 'path_hz', 'raw_text',
+                'activity',
+                'evidence_count', 'evidence_required',
+                'correlation', 'correlated_freq_hz'):
+        if spot.get(key) is not None:
+            payload[key] = spot[key]
+    return payload
+
+
+def _cw_evidence_payload(intent, band, receiver_call, receiver_grid,
+                         timestamp=None):
+    """Versioned MQTT record for one raw ITILA callsign observation."""
+    freq_hz = int(round(intent.freq_khz * 1000.0))
+    payload = {
+        'schema': 'sparkgap.cw_evidence.v1',
+        'call': intent.call,
+        'freq_hz': freq_hz,
+        'snr': int(round(intent.snr_db)),
+        'wpm': int(intent.wpm),
+        'band': _band_name_for_freq_hz(freq_hz, band),
+        'receiver_call': receiver_call,
+        'receiver_grid': receiver_grid,
+        'raw_text': intent.raw_text,
+        'bin_id': int(intent.bin_id),
+        'window_id': int(intent.window_id),
+        'path_hz': int(intent.path_hz),
+        'evidence_id': intent.evidence_id,
+        'session_id': PROCESS_SESSION_ID,
+        'evidence_count': int(intent.evidence_count),
+        'evidence_required': int(intent.evidence_required),
+        'decision': intent.decision,
+        'activity': 'cq' if intent.is_runner else 'qso',
+        'ts': int(time.time() if timestamp is None else timestamp),
+    }
+    if intent.correlation is not None:
+        payload['correlation'] = round(float(intent.correlation), 4)
+        payload['correlated_freq_hz'] = int(round(intent.correlated_freq_khz * 1000.0))
+    return payload
+
+
+def _max_envelope_correlation(left, right, max_lag=16):
+    """Maximum Pearson correlation across a small signature lag search."""
+    if not left or not right or len(left) != len(right) or len(left) < 8:
+        return None
+    best = -1.0
+    for lag in range(-max_lag, max_lag + 1):
+        if lag < 0:
+            a, b = left[-lag:], right[:lag]
+        elif lag > 0:
+            a, b = left[:-lag], right[lag:]
+        else:
+            a, b = left, right
+        if len(a) < 8:
+            continue
+        am = sum(a) / len(a)
+        bm = sum(b) / len(b)
+        av = sum((x - am) ** 2 for x in a)
+        bv = sum((x - bm) ** 2 for x in b)
+        if av <= 1e-20 or bv <= 1e-20:
+            continue
+        corr = sum((x - am) * (y - bm) for x, y in zip(a, b)) / ((av * bv) ** 0.5)
+        best = max(best, corr)
+    return None if best < -0.5 else best
+
+
+def _envelope_signature(envelope, length=ITILA_SC_SIGNATURE_LEN):
+    """Mean-pool and normalize one decoder envelope for correlation."""
+    values = np.asarray(envelope, dtype=np.float64)
+    if values.size < length:
+        return ()
+    edges = np.linspace(0, values.size, length + 1, dtype=np.int64)
+    pooled = np.array([values[edges[i]:edges[i + 1]].mean()
+                       for i in range(length)], dtype=np.float64)
+    scale = pooled.std()
+    if scale < 1e-20:
+        return tuple(0.0 for _ in range(length))
+    return tuple(((pooled - pooled.mean()) / scale).astype(np.float32))
+
+
+def _stop_mqtt_publisher():
+    """Stop the shared Paho network loop during graceful shutdown."""
+    global _mqtt_pub
+    if _mqtt_pub is None:
+        return
+    try:
+        _mqtt_pub.disconnect()
+        _mqtt_pub.loop_stop()
+    except Exception as exc:
+        log.debug("MQTT shutdown error: %s", exc)
+    finally:
+        _mqtt_pub = None
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +252,13 @@ def _get_hpsdr_fast():
     if _hpsdr_fast_lib is None:
         import ctypes as _ct
         try:
-            lib = _ct.CDLL('./libhpsdr_fast.so')
+            lib = _ct.CDLL(_native_library('libhpsdr_fast.so'))
+            lib.hpsdr_result_size.restype = _ct.c_int
+            actual_result_size = lib.hpsdr_result_size()
+            if actual_result_size != ITILA_SC_RESULT_SIZE:
+                raise OSError(
+                    f'libhpsdr_fast result ABI is {actual_result_size} bytes; '
+                    f'expected {ITILA_SC_RESULT_SIZE}; rebuild native libraries')
             lib.hpsdr_create.restype = _ct.c_void_p
             lib.hpsdr_create.argtypes = [_ct.c_char_p, _ct.c_int, _ct.c_int,
                                           _ct.c_int, _ct.c_int]
@@ -168,8 +337,9 @@ def _get_hpsdr_fast():
                 pass
             _hpsdr_fast_lib = lib
             log.info("Loaded libhpsdr_fast.so (C receiver)")
-        except OSError:
-            log.warning("libhpsdr_fast.so not found — falling back to Python receiver")
+        except (OSError, AttributeError) as exc:
+            log.warning("libhpsdr_fast.so unavailable or incompatible (%s) — "
+                        "falling back to Python receiver", exc)
             _hpsdr_fast_lib = False
     return _hpsdr_fast_lib if _hpsdr_fast_lib else None
 
@@ -265,7 +435,7 @@ BANDS = {
     '10m': 28040000,
 }
 
-# IARU Region 2 CW skimmer windows (kHz).  Each entry:
+# IARU CW skimmer windows (kHz). Each entry:
 #   (cw_lo, cw_hi_excluding_ft4, cw_hi_including_ft4_zone, ft8_freq_khz)
 #
 # cw_hi_excluding_ft4: tight upper edge, stops below FT4 if FT4 is in CW area
@@ -277,6 +447,20 @@ BANDS = {
 #
 # On bands where FT4 > FT8 (20m, 15m, 10m), the FT4 zone is unreachable from
 # the CW segment via a single window; the two _hi values are equal.
+CW_BAND_PLAN_R1 = [
+    # Strict CW-preferred segments from the IARU Region 1 HF band plan.
+    # Region 1's 40 m CW segment ends at 7040 kHz, below the FT4 area.
+    (1810,   1838,      1838,         1840),
+    (3500,   3570,      3570,         3573),
+    (7000,   7040,      7040,         7074),
+    (10100,  10130,     10130,        10136),
+    (14000,  14070,     14070,        14074),
+    (18068,  18095,     18095,        18100),
+    (21000,  21070,     21070,        21074),
+    (24890,  24915,     24915,        24915),
+    (28000,  28070,     28070,        28074),
+]
+
 CW_BAND_PLAN_R2 = [
     # (lo,    hi_no_ft4, hi_with_ft4, ft8)
     (1810,   1995,      1995,         0),       # 160m — no FT8/FT4 in window
@@ -290,19 +474,29 @@ CW_BAND_PLAN_R2 = [
     (28000,  28070,     28070,        28074),   # 10m   — FT4=28180 above FT8 (unreachable)
 ]
 
-def _derive_cw_window(center_khz, exclude_ft8=True, exclude_ft4=False):
-    """Look up the CW window for the IARU R2 band containing center_khz.
+CW_BAND_PLANS = {1: CW_BAND_PLAN_R1, 2: CW_BAND_PLAN_R2}
+
+
+def _derive_cw_window(center_khz, exclude_ft8=True, exclude_ft4=False,
+                      region=2):
+    """Look up the CW window for an IARU region containing center_khz.
 
     Returns (cw_min_khz, cw_max_khz) or None if center_khz doesn't fall
     near any known band.  The "near" criterion is ±200 kHz of either edge
     so it works whether the receiver center is above, inside, or below
     the CW segment.
 
+    Region 2 remains the default for compatibility with existing profiles.
     Defaults match WF8Z preference (2026-05-25): FT8 zones excluded
     (phantom bin source on noisy 10m, also general waste), FT4 zones
     included (CW drift in contests is real).  Override via config flags.
     """
-    for lo, hi_no_ft4, hi_with_ft4, ft8 in CW_BAND_PLAN_R2:
+    try:
+        band_plan = CW_BAND_PLANS[int(region)]
+    except (KeyError, TypeError, ValueError):
+        raise ValueError(f"Unsupported IARU region: {region!r}; expected 1 or 2")
+
+    for lo, hi_no_ft4, hi_with_ft4, ft8 in band_plan:
         if lo - 200 <= center_khz <= hi_with_ft4 + 200:
             hi = hi_no_ft4 if exclude_ft4 else hi_with_ft4
             if not exclude_ft8 and ft8 > 0:
@@ -1215,7 +1409,7 @@ def _get_uhsdr_lib():
     if _uhsdr_lib is None:
         import ctypes as _ct
         try:
-            _uhsdr_lib = _ct.CDLL('./libuhsdr_cw.so')
+            _uhsdr_lib = _ct.CDLL(_native_library('libuhsdr_cw.so'))
             _uhsdr_lib.uhsdr_init.restype = _ct.c_void_p
             _uhsdr_lib.uhsdr_init.argtypes = [_ct.c_float, _ct.c_float, _ct.c_int]
             _uhsdr_lib.uhsdr_feed.restype = _ct.c_int
@@ -1299,7 +1493,7 @@ def _get_bmorse_lib():
     if _bmorse_lib is None:
         import ctypes as _ct
         try:
-            _bmorse_lib = _ct.CDLL('./libbmorse.so')
+            _bmorse_lib = _ct.CDLL(_native_library('libbmorse.so'))
             _bmorse_lib.bmorse_create.restype = _ct.c_void_p
             _bmorse_lib.bmorse_create.argtypes = [_ct.c_float, _ct.c_float, _ct.c_int]
             _bmorse_lib.bmorse_feed.restype = _ct.c_int
@@ -1509,7 +1703,7 @@ def _get_itila_lib():
     if _itila_lib is None:
         import ctypes as _ct
         try:
-            _itila_lib = _ct.CDLL('./libitila.so')
+            _itila_lib = _ct.CDLL(_native_library('libitila.so'))
             _itila_lib.itila_create.restype = _ct.c_void_p
             _itila_lib.itila_create.argtypes = [_ct.c_int, _ct.c_double]
             _itila_lib.itila_feed.restype  = _ct.c_char_p
@@ -1538,7 +1732,7 @@ def _get_rtty_lib():
     if _rtty_lib is None:
         import ctypes as _ct
         try:
-            _rtty_lib = _ct.CDLL('./librtty.so')
+            _rtty_lib = _ct.CDLL(_native_library('librtty.so'))
             _rtty_lib.rtty_create.restype = _ct.c_void_p
             _rtty_lib.rtty_create.argtypes = [_ct.c_int, _ct.c_double]
             _rtty_lib.rtty_feed.restype  = _ct.c_char_p
@@ -1819,7 +2013,7 @@ class _ItilaDsp:
 def _get_itila_dsp(sample_rate, center_hz, max_bins, sos100, sos200):
     import ctypes as _ct
     try:
-        lib = _ct.CDLL('./libitila_dsp.so')
+        lib = _ct.CDLL(_native_library('libitila_dsp.so'))
         lib.itila_dsp_create.restype  = _ct.c_void_p
         lib.itila_dsp_create.argtypes = [
             _ct.c_int, _ct.c_double, _ct.c_int,
@@ -1859,6 +2053,22 @@ def _get_itila_dsp(sample_rate, center_hz, max_bins, sos100, sos200):
     except OSError:
         log.warning("libitila_dsp.so not found — falling back to Python DSP")
         return None
+
+
+def _unpack_scanner_result(buf, offset=0):
+    """Decode the shared native scanner result ABI."""
+    import ctypes as _ct
+    f_hz = _ct.c_double.from_buffer(buf, offset).value
+    snr = _ct.c_double.from_buffer(buf, offset + 8).value
+    wpm = _ct.c_int.from_buffer(buf, offset + 16).value
+    raw = bytes(buf[offset + 24:offset + 280]).split(b'\0')[0].decode(
+        'ascii', errors='replace')
+    cost = _ct.c_double.from_buffer(buf, offset + 280).value
+    values = struct.unpack_from('=Qii256f', buf, offset + 288)
+    window_id, path_hz, signature_n = values[:3]
+    signature_n = min(max(signature_n, 0), ITILA_SC_SIGNATURE_LEN)
+    signature = tuple(values[3:3 + signature_n])
+    return f_hz, snr, wpm, raw, cost, window_id, path_hz, signature
 
 
 class _ItilaSc:
@@ -1919,7 +2129,13 @@ def _get_itila_scanner(sample_rate, center_hz, max_bins, min_snr,
                         sos100, sos200):
     import ctypes as _ct
     try:
-        lib = _ct.CDLL('./libitila_scanner.so')
+        lib = _ct.CDLL(_native_library('libitila_scanner.so'))
+        lib.itila_sc_result_size.restype = _ct.c_int
+        actual_result_size = lib.itila_sc_result_size()
+        if actual_result_size != ITILA_SC_RESULT_SIZE:
+            raise OSError(
+                f'libitila_scanner result ABI is {actual_result_size} bytes; '
+                f'expected {ITILA_SC_RESULT_SIZE}; rebuild native libraries')
         lib.itila_sc_create.restype  = _ct.c_void_p
         lib.itila_sc_create.argtypes = [
             _ct.c_int, _ct.c_double, _ct.c_int, _ct.c_double,
@@ -1963,6 +2179,8 @@ def _get_itila_scanner(sample_rate, center_hz, max_bins, min_snr,
         lib.itila_sc_peek_env.argtypes = [
             _ct.c_void_p, _ct.c_double,
             _ct.POINTER(_ct.c_double), _ct.POINTER(_ct.c_double), _ct.c_int]
+        lib.itila_sc_add_probe_bin.restype = _ct.c_int
+        lib.itila_sc_add_probe_bin.argtypes = [_ct.c_void_p, _ct.c_double]
         lib.itila_sc_set_decoder.restype  = None
         lib.itila_sc_set_decoder.argtypes = [
             _ct.c_void_p,
@@ -1998,8 +2216,8 @@ def _get_itila_scanner(sample_rate, center_hz, max_bins, min_snr,
         log.info("Loaded libitila_scanner.so (sr=%d center=%.0f Hz bins=%d)",
                  sample_rate, center_hz, max_bins)
         return _ItilaSc(lib, _ct.c_void_p(h))
-    except OSError:
-        log.warning("libitila_scanner.so not found")
+    except (OSError, AttributeError) as exc:
+        log.warning("libitila_scanner.so unavailable or incompatible: %s", exc)
         return None
 
 
@@ -2035,6 +2253,7 @@ class _PFBLibShim:
         'itila_sc_get_snr':       'pfb_sc_get_snr',
         'itila_sc_set_decoder':   'pfb_sc_set_decoder',
         'itila_sc_decode_ready':  'pfb_sc_decode_ready',
+        'itila_sc_result_size':   'pfb_sc_result_size',
         'itila_sc_env_drops':     'pfb_sc_env_drops',
         'itila_sc_bins_peak':     'pfb_sc_bins_peak',
         'itila_sc_free':          'pfb_sc_free',
@@ -2056,7 +2275,13 @@ def _get_pfb_scanner(sample_rate, center_hz, max_bins, min_snr,
     The PFB backend is selected when use_pfb_scanner=True."""
     import ctypes as _ct
     try:
-        lib = _ct.CDLL('./libpfb_scanner.so')
+        lib = _ct.CDLL(_native_library('libpfb_scanner.so'))
+        lib.pfb_sc_result_size.restype = _ct.c_int
+        actual_result_size = lib.pfb_sc_result_size()
+        if actual_result_size != ITILA_SC_RESULT_SIZE:
+            raise OSError(
+                f'libpfb_scanner result ABI is {actual_result_size} bytes; '
+                f'expected {ITILA_SC_RESULT_SIZE}; rebuild native libraries')
         lib.pfb_sc_create.restype  = _ct.c_void_p
         lib.pfb_sc_create.argtypes = [
             _ct.c_int, _ct.c_double, _ct.c_int, _ct.c_double,
@@ -2137,8 +2362,8 @@ def _get_pfb_scanner(sample_rate, center_hz, max_bins, min_snr,
         sc = _ItilaSc(_PFBLibShim(lib), h_void)
         sc.envelope_rate = out_rt
         return sc
-    except OSError:
-        log.warning("libpfb_scanner.so not found")
+    except (OSError, AttributeError) as exc:
+        log.warning("libpfb_scanner.so unavailable or incompatible: %s", exc)
         return None
 
 
@@ -2316,6 +2541,12 @@ class _ItilaScanner:
                  max_bins=80, use_pfb=False, valid_calls=None,
                  enable_caller_spotting=True,
                  gate_timing_cost=False, timing_cost_max=30.0):
+        if not use_pfb and sample_rate != 192000:
+            raise ValueError(
+                "The native ITILA FIR scanner requires sample_rate=192000; "
+                f"got {sample_rate}. Its fixed decimation chain and FIR "
+                "coefficients are designed for 192 ksample/s."
+            )
         self.valid_calls = valid_calls or set()
         self.enable_caller_spotting = bool(enable_caller_spotting)
         # ggmorse-inspired confidence gate on segmentation quality
@@ -2376,9 +2607,9 @@ class _ItilaScanner:
                     self._sc._h,
                     _ct.cast(itila_lib.itila_get_last_cost, _ct.c_void_p))
             self._c_decode = True
-            # Pre-allocate result buffer for C decode loop
-            # NOTE: ScDecodeResult is now 288 bytes (added 8-byte trailing cost field).
-            self._decode_results = (_ct.c_char * (288 * 128))()
+            # Pre-allocate the common native result ABI buffer.
+            self._decode_results = (_ct.c_char *
+                                    (ITILA_SC_RESULT_SIZE * 128))()
         else:
             self._c_decode = False
 
@@ -2448,8 +2679,11 @@ class _ItilaScanner:
         if snr > 0:
             st['snr'] = snr
         now = time.time()
+        window_id = st['window_id_next']
+        st['window_id_next'] += 1
 
-        for h, env in ((st['h100'], env100), (st['h200'], env200)):
+        for path_hz, h, env in ((100, st['h100'], env100),
+                                (200, st['h200'], env200)):
             if h is None or h.value is None:
                 continue
             env_c = np.ascontiguousarray(env[:n_drained], dtype=np.float64)
@@ -2483,9 +2717,12 @@ class _ItilaScanner:
 
             # Path 1: direct extraction from this window (standard)
             call = _itila_extract_cq_call(raw, self.valid_calls)
-            if call and call not in st['spotted']:
+            if call:
                 st['spotted'].add(call)
-                _emit_intent(st, f_khz, call, wpm, is_runner=True, raw_text=raw)
+                _emit_intent(st, f_khz, call, wpm, is_runner=True,
+                             raw_text=raw, window_id=window_id,
+                             path_hz=path_hz,
+                             envelope_signature=_envelope_signature(env_c))
                 log.info("ITILA scan %.1f kHz: %s %d WPM (raw: %s)", f_khz, call, wpm, raw[:60])
                 if self._sc:
                     self._sc._lib.itila_sc_mark_evidence(
@@ -2502,9 +2739,12 @@ class _ItilaScanner:
                 if self.enable_caller_spotting:
                     calls_in_raw = _itila_extract_all_calls(st['text_buf'])
                     for c in calls_in_raw:
-                        if c not in st['spotted']:
+                        if c:
                             st['spotted'].add(c)
-                            _emit_intent(st, f_khz, c, wpm, is_runner=False, raw_text=raw)
+                            _emit_intent(st, f_khz, c, wpm, is_runner=False,
+                                         raw_text=raw, window_id=window_id,
+                                         path_hz=path_hz,
+                                         envelope_signature=_envelope_signature(env_c))
                             log.info("ITILA context %.1f kHz: %s %d WPM (CQ %ds ago, all)",
                                      f_khz, c, wpm, int(now - st['last_cq_time']))
                             if self._sc:
@@ -2512,9 +2752,12 @@ class _ItilaScanner:
                                     self._sc._h, _ct.c_double(f_hz))
                 else:
                     call = _itila_extract_cq_call(st['text_buf'], self.valid_calls)
-                    if call and call not in st['spotted']:
+                    if call:
                         st['spotted'].add(call)
-                        _emit_intent(st, f_khz, call, wpm, is_runner=True, raw_text=raw)
+                        _emit_intent(st, f_khz, call, wpm, is_runner=True,
+                                     raw_text=raw, window_id=window_id,
+                                     path_hz=path_hz,
+                                     envelope_signature=_envelope_signature(env_c))
                         log.info("ITILA context %.1f kHz: %s %d WPM (CQ %ds ago, runner)",
                                  f_khz, call, wpm, int(now - st['last_cq_time']))
                         if self._sc:
@@ -2526,10 +2769,10 @@ class _ItilaScanner:
         import ctypes as _ct
         if not self._sc or not getattr(self, '_c_decode', False):
             return
-        # ScDecodeResult: {double f_hz(8), double snr(8), int wpm(4), pad(4),
-        # char text[256], double cost(8)} — 288 bytes per result.
+        # Shared scanner result ABI: 288-byte legacy prefix followed by native
+        # window/path identity and a normalized 256-float envelope signature.
         max_results = 128
-        result_size = 8 + 8 + 4 + 4 + 256 + 8  # 288 bytes
+        result_size = ITILA_SC_RESULT_SIZE
         buf = _ct.create_string_buffer(result_size * max_results)
         n = self._sc._lib.itila_sc_decode_ready(
             self._sc._h, _ct.c_int(self._window_samples),
@@ -2538,12 +2781,8 @@ class _ItilaScanner:
         now = time.time()
         for i in range(n):
             offset = i * result_size
-            f_hz = _ct.c_double.from_buffer(buf, offset).value
-            snr = _ct.c_double.from_buffer(buf, offset + 8).value
-            wpm = _ct.c_int.from_buffer(buf, offset + 16).value
-            # text occupies bytes 24..279; cost is the trailing double at 280.
-            raw = buf[offset + 24:offset + 280].split(b'\0')[0].decode('ascii', errors='replace')
-            cost = _ct.c_double.from_buffer(buf, offset + 280).value
+            (f_hz, snr, wpm, raw, cost, window_id, path_hz,
+             signature) = _unpack_scanner_result(buf, offset)
 
             if not raw:
                 continue
@@ -2573,9 +2812,11 @@ class _ItilaScanner:
 
             # Path 1: direct CQ extraction
             call = _itila_extract_cq_call(raw, self.valid_calls)
-            if call and call not in st['spotted']:
+            if call:
                 st['spotted'].add(call)
-                _emit_intent(st, f_khz, call, wpm, is_runner=True, raw_text=raw)
+                _emit_intent(st, f_khz, call, wpm, is_runner=True,
+                             raw_text=raw, window_id=window_id,
+                             path_hz=path_hz, envelope_signature=signature)
                 log.info("ITILA scan %.1f kHz: %s %d WPM (raw: %s)", f_khz, call, wpm, raw[:60])
                 if self._sc:
                     self._sc._lib.itila_sc_mark_evidence(
@@ -2586,9 +2827,12 @@ class _ItilaScanner:
                 if self.enable_caller_spotting:
                     calls_in_raw = _itila_extract_all_calls(st['text_buf'])
                     for c in calls_in_raw:
-                        if c not in st['spotted']:
+                        if c:
                             st['spotted'].add(c)
-                            _emit_intent(st, f_khz, c, wpm, is_runner=False, raw_text=raw)
+                            _emit_intent(st, f_khz, c, wpm, is_runner=False,
+                                         raw_text=raw, window_id=window_id,
+                                         path_hz=path_hz,
+                                         envelope_signature=signature)
                             log.info("ITILA context %.1f kHz: %s %d WPM (CQ %ds ago, all)",
                                      f_khz, c, wpm, int(now - st['last_cq_time']))
                             if self._sc:
@@ -2596,9 +2840,12 @@ class _ItilaScanner:
                                     self._sc._h, _ct.c_double(f_hz))
                 else:
                     call = _itila_extract_cq_call(st['text_buf'], self.valid_calls)
-                    if call and call not in st['spotted']:
+                    if call:
                         st['spotted'].add(call)
-                        _emit_intent(st, f_khz, call, wpm, is_runner=True, raw_text=raw)
+                        _emit_intent(st, f_khz, call, wpm, is_runner=True,
+                                     raw_text=raw, window_id=window_id,
+                                     path_hz=path_hz,
+                                     envelope_signature=signature)
                         log.info("ITILA context %.1f kHz: %s %d WPM (CQ %ds ago, runner)",
                                  f_khz, call, wpm, int(now - st['last_cq_time']))
                         if self._sc:
@@ -2667,7 +2914,7 @@ def _get_cw_dispatcher_lib():
         return _cw_disp_lib
     import ctypes as _ct
     try:
-        _cw_disp_lib = _ct.CDLL('./libcw_dispatcher.so')
+        _cw_disp_lib = _ct.CDLL(_native_library('libcw_dispatcher.so'))
     except OSError:
         log.warning("libcw_dispatcher.so not found — dispatcher path disabled")
         _cw_disp_lib = False  # sentinel: tried and failed
@@ -3485,7 +3732,7 @@ def _get_cw_engine():
     _cw_engine_initialized = True
     import ctypes as _ct
     try:
-        _cw_engine_lib = _ct.CDLL('./libcw_engine.so')
+        _cw_engine_lib = _ct.CDLL(_native_library('libcw_engine.so'))
 
         _cw_engine_lib.cw_engine_init.restype = _ct.c_int
         _cw_engine_lib.cw_engine_init.argtypes = [_ct.c_char_p]
@@ -4161,7 +4408,8 @@ class InstanceManager:
                  cw_min_khz=0.0, cw_max_khz=99999.0,
                  enable_caller_spotting=True,
                  gate_timing_cost=False, timing_cost_max=30.0,
-                 exclude_ft8_freqs=True, exclude_ft4_freqs=False):
+                 exclude_ft8_freqs=True, exclude_ft4_freqs=False,
+                 iaru_region=2):
         self.valid_calls = valid_calls or set()
         self.sample_rate = sample_rate
         self.decoder_bin = decoder_bin
@@ -4192,6 +4440,9 @@ class InstanceManager:
         #              scanning.  Override either in sk_5band.json.
         self.exclude_ft8_freqs = bool(exclude_ft8_freqs)
         self.exclude_ft4_freqs = bool(exclude_ft4_freqs)
+        self.iaru_region = int(iaru_region)
+        if self.iaru_region not in CW_BAND_PLANS:
+            raise ValueError(f"Unsupported IARU region: {self.iaru_region}; expected 1 or 2")
         self._itila_scanner = None  # created lazily in update_signals once center_khz is known
         self.max_instances = max_instances  # total decoder process cap (legacy)
         # max_channels: max simultaneous signals — decoupled from decoder count
@@ -4262,11 +4513,13 @@ class InstanceManager:
                     auto = _derive_cw_window(
                         center_khz,
                         exclude_ft8=self.exclude_ft8_freqs,
-                        exclude_ft4=self.exclude_ft4_freqs)
+                        exclude_ft4=self.exclude_ft4_freqs,
+                        region=self.iaru_region)
                     if auto:
                         bmin, bmax = auto
-                        log.info("CW window for %.0f kHz: [%.0f, %.0f] kHz "
-                                 "(ft8_excl=%s ft4_excl=%s)",
+                        log.info("IARU Region %d CW window for %.1f kHz: "
+                                 "[%.0f, %.0f] kHz (ft8_excl=%s ft4_excl=%s)",
+                                 self.iaru_region,
                                  center_khz, bmin, bmax,
                                  self.exclude_ft8_freqs, self.exclude_ft4_freqs)
                     else:
@@ -4797,27 +5050,43 @@ class SpotIntent:
     is_runner: bool        # True = Path 1 (call extracted adjacent to CQ trigger)
                            # False = Path 2 (caller-spotting, repeated calls in
                            # rolling buffer after a recent CQ on this bin)
-    raw_text:  str = ''    # window's primary_text — telemetry / debug only
-    window_id: int = 0     # monotonic per-bin counter; lets downstream group
+    raw_text:  str = ''    # native window's primary_text — diagnostic evidence
+    window_id: int = 0     # monotonic native per-scanner decode-window sequence
                            # multiple intents from one window without text reparse
     bin_id:    int = 0     # id(bin_state) — stable for bin lifetime
+    path_hz:   int = 0     # 100/200 Hz decoder filter path
+    envelope_signature: tuple = field(default_factory=tuple, repr=False)
+    evidence_id: str = ''
+    evidence_count: int = 0
+    evidence_required: int = 2
+    decision: str = 'pending'
+    correlation: float | None = None
+    correlated_freq_khz: float | None = None
 
 
-def _emit_intent(st, f_khz, call, wpm, is_runner, raw_text=''):
+def _emit_intent(st, f_khz, call, wpm, is_runner, raw_text='',
+                 window_id=None, path_hz=0, envelope_signature=()):
     """Construct + append a SpotIntent to a scanner-bin pending queue.
 
     Centralizes intent construction so all three ITILA emit paths
     (_process_ready, _process_ready_c, async_main C-drain) build records
-    identically.  Auto-increments bin's window_id counter.
+    identically. Python decode fallback allocates a local sequence when the
+    native scanner did not supply one.
     """
+    if window_id is None:
+        window_id = st['window_id_next']
+        st['window_id_next'] += 1
     intent = SpotIntent(
         call=call, freq_khz=f_khz, snr_db=st['snr'], wpm=wpm,
         is_runner=is_runner,
-        raw_text=raw_text[:80] if raw_text else '',
-        window_id=st['window_id_next'],
+        raw_text=raw_text[:256] if raw_text else '',
+        window_id=window_id,
         bin_id=id(st),
+        path_hz=path_hz,
+        envelope_signature=tuple(envelope_signature),
     )
-    st['window_id_next'] += 1
+    intent.evidence_id = (f'{PROCESS_SESSION_ID}:{intent.bin_id}:'
+                          f'{intent.window_id}:{intent.path_hz}')
     st['pending'].append(intent)
 
 
@@ -4845,7 +5114,7 @@ class SpotTracker:
         'gate_bypass_consensus':       False,  # bypass goes through freq consensus vs simple count
         'gate_scp_bucket_substitute':  False,  # emit bucket form instead of raw call
         'gate_short_scp_bucket':       True,   # suppress bucket-substitute into ≤3-char targets w/o peer corroboration (M5M class)
-        'gate_short_scp_exact':        True,   # require 2nd-sighting before emitting ≤3-char SCP via ITILA [exact] path (G5E/SE5E class) — closes the M5M-gate bypass where ITILA synth "CQ <call>" auto-sets has_context
+        'gate_short_scp_exact':        True,   # retained compatibility flag; all ITILA exact calls now require independent windows
         'gate_recent_band_floor':      False,  # anchor solo decode if peers saw it recently (S-floor)
         'gate_harmonic_filter':        False,  # drop 2x-5x harmonic spurs of same-call recent spots
         'enable_caller_spotting':      True,   # extract callers AND runner from QSO buffer (c042491)
@@ -4855,7 +5124,7 @@ class SpotTracker:
     def __init__(self, valid_calls, blacklist, respot_interval=120,
                  fuzzy_min_cycles=3, add_calls=None, scp_bypass_threshold=0,
                  patt3ch_path='patt3ch.lst', gate_config=None,
-                 recent_band_config=None):
+                 recent_band_config=None, itila_min_windows=2):
         self.valid_calls = valid_calls
         self.blacklist = blacklist
         self.respot_interval = respot_interval
@@ -4865,6 +5134,13 @@ class SpotTracker:
         self.gate_config = dict(self.GATE_DEFAULTS)
         if gate_config:
             self.gate_config.update(gate_config)
+        self.itila_min_windows = max(2, int(itila_min_windows))
+        # Native evidence delivery is at-least-once: the two filter paths can
+        # also return a call from the same RF window.  Keep transport identity
+        # and consensus-window identity separate so neither can double-vote.
+        self._itila_seen_evidence = {}
+        self._itila_windows = defaultdict(list)
+        self._itila_corr_history = defaultdict(list)
         # Recent-on-band support floor (S-floor, ported from N2WQ's
         # GoCluster). When peer DX clusters spot a call on a band, we
         # remember it for `window_sec`. If our own decoder later sees
@@ -5168,6 +5444,37 @@ class SpotTracker:
                 self._short_scp_exact_attempts.pop(k, None)
             stats['short_scp_exact_attempts'] = (
                 len(stale), len(self._short_scp_exact_attempts))
+
+        # Native ITILA evidence is only useful inside the consensus window.
+        cutoff = now - self.SIGHTING_WINDOW
+        stale = [key for key, ts in list(self._itila_seen_evidence.items())
+                 if ts < cutoff]
+        for key in stale:
+            self._itila_seen_evidence.pop(key, None)
+        stats['itila_seen_evidence'] = (len(stale), len(self._itila_seen_evidence))
+
+        stale_keys = []
+        for key, entries in list(self._itila_windows.items()):
+            fresh = [(ts, wid) for ts, wid in entries if ts >= cutoff]
+            if fresh:
+                self._itila_windows[key] = fresh
+            else:
+                stale_keys.append(key)
+        for key in stale_keys:
+            self._itila_windows.pop(key, None)
+        stats['itila_windows'] = (len(stale_keys), len(self._itila_windows))
+
+        stale_keys = []
+        for call, entries in list(self._itila_corr_history.items()):
+            fresh = [entry for entry in entries if entry[0] >= cutoff]
+            if fresh:
+                self._itila_corr_history[call] = fresh
+            else:
+                stale_keys.append(call)
+        for call in stale_keys:
+            self._itila_corr_history.pop(call, None)
+        stats['itila_corr_history'] = (
+            len(stale_keys), len(self._itila_corr_history))
 
         return stats
 
@@ -5636,16 +5943,21 @@ class SpotTracker:
     def _can_respot(self, call, freq_khz, now):
         """Per-(call,freq) respot check. QSY >1kHz = immediate spot."""
         if not hasattr(self, '_respot_times'):
-            self._respot_times = {}
-        key = (call, round(freq_khz))
-        last = self._respot_times.get(key, 0)
-        return (now - last) >= self.respot_interval
+            self._respot_times = defaultdict(list)
+        cutoff = now - self.respot_interval
+        recent = [(freq, ts) for freq, ts in self._respot_times[call]
+                  if ts > cutoff]
+        self._respot_times[call] = recent
+        return not any(abs(freq_khz - freq) <= 1.0 for freq, _ in recent)
 
     def _mark_spotted(self, call, freq_khz, now):
         if not hasattr(self, '_respot_times'):
-            self._respot_times = {}
-        key = (call, round(freq_khz))
-        self._respot_times[key] = now
+            self._respot_times = defaultdict(list)
+        cutoff = now - self.respot_interval
+        recent = [(freq, ts) for freq, ts in self._respot_times[call]
+                  if ts > cutoff and abs(freq_khz - freq) > 1.0]
+        recent.append((freq_khz, now))
+        self._respot_times[call] = recent
 
     def _extend_truncated_call(self, call):
         """If `call` looks like a real SCP call with the last letter dropped,
@@ -5749,51 +6061,89 @@ class SpotTracker:
     def process_intent(self, intent):
         """Consume a structured SpotIntent from _ItilaScanner.
 
-        Behavior-compatible thin wrapper: synthesizes the same "CQ <call> "
-        text the legacy collect() path used to produce, then delegates to
-        process() with dec_type='itila'.  This keeps the gate semantics
-        bit-identical to the deployed text path — the refactor's value is in
-        eliminating the string-IPC ambiguity at the source (one window event
-        = one process_intent call, regardless of how many extractions
-        happened in that window), not in re-tuning the gates.
-
-        Future optimization: process() could grow optional hints
-        (extracted_call, is_runner, has_cq_context) to skip the
-        re-parsing step.  Deferred until this wrapper proves stable.
+        Native ITILA evidence never receives synthetic CQ context.  At least
+        two distinct decoder windows must agree in the same 500 Hz RF bucket,
+        even for an exact SCP match.  The 100/200 Hz paths from one drained IQ
+        window share a window_id and count as one observation.
         """
-        # gate_short_scp_exact: require a second sighting at the same freq
-        # for ≤3-char SCP calls coming via the ITILA [exact] path.  The
-        # synthetic "CQ <call> " below auto-sets has_context in process(),
-        # which bypasses the multi-sighting requirement -- letting G5E,
-        # SE5E, M5M-class noise hallucinations emit on a single decode
-        # window.  Track per-(call, freq_bin) attempts in a 10-min sliding
-        # window; emit only on the 2nd+ occurrence.  Real CW contest CQers
-        # repeat continuously so the one-window delay is acceptable; noise
-        # rarely reproduces the same call at the same freq inside the TTL.
-        if (self.gate_config.get('gate_short_scp_exact', True)
-                and len(intent.call) <= 3
-                and intent.call in self.valid_calls):
-            freq_bin = int(round(intent.freq_khz * 2))  # match SpotTracker's 500 Hz bin
-            key = (intent.call, freq_bin)
-            now = time.time()
-            if not hasattr(self, '_short_scp_exact_attempts'):
-                self._short_scp_exact_attempts = {}
-            cutoff = now - self.SHORT_SCP_EXACT_TTL
-            recent = [t for t in self._short_scp_exact_attempts.get(key, ()) if t >= cutoff]
-            if not recent:
-                self._short_scp_exact_attempts[key] = [now]
-                if self.gate_config.get('gate_telemetry', True):
-                    log.debug("GATE short_scp_exact: %s @ %.1f kHz first sighting (deferred)",
-                              intent.call, intent.freq_khz)
-                return []
-            recent.append(now)
-            self._short_scp_exact_attempts[key] = recent
-        synth = f'CQ {intent.call} '
-        return self.process(intent.freq_khz, intent.snr_db, synth, synth,
-                            intent.bin_id, dec_type='itila', wpm=intent.wpm)
+        now = time.time()
+        cutoff = now - self.SIGHTING_WINDOW
+        freq_bin = int(round(intent.freq_khz * 2))
+        transport_id = (intent.bin_id, intent.window_id, intent.path_hz)
+        window_id = (intent.bin_id, intent.window_id)
+        intent.evidence_id = intent.evidence_id or \
+            (f'{PROCESS_SESSION_ID}:{intent.bin_id}:'
+             f'{intent.window_id}:{intent.path_hz}')
+        intent.evidence_required = self.itila_min_windows
+
+        key = (intent.call, freq_bin)
+        windows = [(ts, wid) for ts, wid in self._itila_windows[key]
+                   if ts >= cutoff]
+        self._itila_windows[key] = windows
+        intent.evidence_count = len(windows)
+        if transport_id in self._itila_seen_evidence:
+            intent.decision = 'duplicate-evidence'
+            return []
+        self._itila_seen_evidence[transport_id] = now
+        if window_id in {wid for _, wid in windows}:
+            intent.decision = 'duplicate-window'
+            return []
+
+        # Correlate against recent evidence for the same decoded call on a
+        # different RF bucket. This is observability only: it never gates.
+        corr_entries = [entry for entry in self._itila_corr_history[intent.call]
+                        if entry[0] >= cutoff]
+        self._itila_corr_history[intent.call] = corr_entries
+        if intent.envelope_signature:
+            best = None
+            for _, other_bin, other_khz, signature in corr_entries:
+                if other_bin == freq_bin:
+                    continue
+                corr = _max_envelope_correlation(intent.envelope_signature, signature)
+                if corr is not None and (best is None or corr > best[0]):
+                    best = (corr, other_khz)
+            if best:
+                intent.correlation, intent.correlated_freq_khz = best
+                if best[0] >= 0.85:
+                    log.warning("ITILA envelope correlation %.3f: %s at %.1f and %.1f kHz",
+                                best[0], intent.call, intent.freq_khz, best[1])
+
+        windows.append((now, window_id))
+        self._itila_windows[key] = windows
+        intent.evidence_count = len(windows)
+        if intent.envelope_signature:
+            corr_entries.append((now, freq_bin, intent.freq_khz,
+                                 intent.envelope_signature))
+
+        spots = self.process(
+            intent.freq_khz, intent.snr_db, intent.call, intent.call,
+            intent.bin_id, dec_type='itila', wpm=intent.wpm,
+            itila_evidence_count=intent.evidence_count,
+            itila_evidence_required=intent.evidence_required,
+        )
+        intent.decision = 'emitted' if spots else (
+            'deferred' if intent.evidence_count < intent.evidence_required
+            else 'rejected-by-gate')
+        for spot in spots:
+            spot.update({
+                'evidence_id': intent.evidence_id,
+                'session_id': PROCESS_SESSION_ID,
+                'bin_id': intent.bin_id,
+                'window_id': intent.window_id,
+                'path_hz': intent.path_hz,
+                'raw_text': intent.raw_text,
+                'activity': 'cq' if intent.is_runner else 'qso',
+                'evidence_count': intent.evidence_count,
+                'evidence_required': intent.evidence_required,
+                'correlation': intent.correlation,
+                'correlated_freq_hz': (None if intent.correlated_freq_khz is None
+                                       else int(round(intent.correlated_freq_khz * 1000.0))),
+            })
+        return spots
 
     def process(self, freq_khz, snr, text, context_text=None, decoder_id=0,
-                dec_type='primary', wpm=0):
+                dec_type='primary', wpm=0, itila_evidence_count=0,
+                itila_evidence_required=2):
         """Process decoded text. Returns list of spot dicts.
 
         text: new text fragment (1-2 chars in streaming mode)
@@ -5824,9 +6174,9 @@ class SpotTracker:
 
         full_text = context_text or text
 
-        # ITILA emits fresh short strings each window ("CQ CALL "), not an
-        # accumulating context.  Skip the incremental-length guard for itila —
-        # its own _decode_window seen-set prevents duplicate entries per window.
+        # ITILA emits one structured callsign candidate per native window, not
+        # accumulating text. Skip the legacy incremental-length guard; its
+        # window/path identity was already deduplicated in process_intent().
         if dec_type == 'itila':
             new_text = full_text
         else:
@@ -5997,6 +6347,8 @@ class SpotTracker:
                         log.debug("WOULD-GATE cq_runner: %s @ %.1f kHz "
                                   "(runner=%s, count=%d)",
                                   call, freq_khz, cq_runner_bucket, recent_count)
+                elif dec_type == 'itila':
+                    gate = itila_evidence_count >= itila_evidence_required
                 else:
                     gate = has_context or recent_count >= min_s
                     # Telemetry: log what cq_runner WOULD have done if enabled
@@ -6384,7 +6736,9 @@ class SparkGap:
                                    add_calls=add_calls,
                                    scp_bypass_threshold=int(self.cfg.get('scp_bypass_threshold', 0)),
                                    gate_config=gate_config,
-                                   recent_band_config=self.cfg.get('recent_band_floor'))
+                                   recent_band_config=self.cfg.get('recent_band_floor'),
+                                   itila_min_windows=int(self.cfg.get(
+                                       'itila_min_consensus_windows', 2)))
         # If the gate is configured (peers listed), start the peer-tee
         # threads regardless of whether the gate is currently on. The
         # support map is cheap to maintain and we want it warm if the
@@ -6393,6 +6747,7 @@ class SparkGap:
             self.tracker.start_recent_band_tees()
 
         self.telnet = SpotTelnetServer(
+            host=self.cfg.get('telnet_host', '0.0.0.0'),
             port=self.cfg.get('telnet_port', 7300),
             callsign=self.cfg.get('callsign', 'WF8Z'),
             node_call=self.cfg.get('node_call', 'SPARK-2'),
@@ -6549,6 +6904,7 @@ class SparkGap:
                 timing_cost_max=float(self.cfg.get('timing_cost_max', 30.0)),
                 exclude_ft8_freqs=bool(self.cfg.get('exclude_ft8_freqs', True)),
                 exclude_ft4_freqs=bool(self.cfg.get('exclude_ft4_freqs', False)),
+                iaru_region=int(self.cfg.get('iaru_region', 2)),
             )
             self.managers.append(mgr)
         # Legacy single-manager ref
@@ -6648,6 +7004,7 @@ class SparkGap:
             mgr.kill_all()
         if self.telnet:
             await self.telnet.stop()
+        _stop_mqtt_publisher()
         if self._wav_record:
             self._wav_record.close()
             self._wav_record = None
@@ -6790,12 +7147,10 @@ class SparkGap:
                     if sc:
                         sc._process_ready()
 
-            # Process decode results — poll from C worker's result buffer.
-            # ScDecodeResult is 288 bytes (text 24..279, cost 280..287); must
-            # match RESULT_SIZE in hpsdr_fast.c and ScDecodeResult in itila_scanner.c.
+            # Process decode results — poll the common 1328-byte scanner ABI.
             if use_c and getattr(self, '_worker_started', False):
                 import ctypes as _ct
-                result_size = 288
+                result_size = ITILA_SC_RESULT_SIZE
                 max_poll = 128
                 if not hasattr(self, '_poll_buf'):
                     self._poll_buf = _ct.create_string_buffer(result_size * max_poll)
@@ -6805,19 +7160,19 @@ class SparkGap:
                 now = time.time()
                 for i in range(n):
                     off = i * result_size
-                    f_hz = _ct.c_double.from_buffer(poll_buf, off).value
-                    snr = _ct.c_double.from_buffer(poll_buf, off + 8).value
-                    wpm = _ct.c_int.from_buffer(poll_buf, off + 16).value
-                    raw = poll_buf[off+24:off+280].split(b'\0')[0].decode('ascii', errors='replace')
-                    cost = _ct.c_double.from_buffer(poll_buf, off + 280).value
+                    (f_hz, snr, wpm, raw, cost, window_id, path_hz,
+                     signature) = _unpack_scanner_result(poll_buf, off)
                     if not raw:
                         continue
                     f_khz = f_hz / 1000.0
                     log.info("ITILA raw %.1f kHz cost=%.2f: %r", f_khz, cost, raw[:80])
                     # Find or create bin state for ticker tape
                     scanner = None
-                    for mgr in self.managers:
-                        if mgr._itila_scanner:
+                    half_bw = float(self.cfg.get('sample_rate', 192000)) / 2.0
+                    for (_bn, center_hz, _ri), mgr in zip(self._band_meta,
+                                                          self.managers):
+                        if (mgr._itila_scanner
+                                and abs(f_hz - center_hz) <= half_bw):
                             scanner = mgr._itila_scanner
                             break
                     # Timing-cost gate (gated off by default at scanner-level).
@@ -6845,17 +7200,23 @@ class SparkGap:
                     if CQ_PATTERNS.search(raw):
                         st['last_cq_time'] = now
                     call = _itila_extract_cq_call(raw, self.tracker.valid_calls)
-                    if call and call not in st['spotted']:
+                    if call:
                         st['spotted'].add(call)
-                        _emit_intent(st, f_khz, call, wpm, is_runner=True, raw_text=raw)
+                        _emit_intent(st, f_khz, call, wpm, is_runner=True,
+                                     raw_text=raw, window_id=window_id,
+                                     path_hz=path_hz,
+                                     envelope_signature=signature)
                         log.info("ITILA scan %.1f kHz: %s %d WPM (raw: %s)",
                                  f_khz, call, wpm, raw[:60])
                     elif now - st['last_cq_time'] < 120.0:
                         # runner-only context extraction (see _process_ready)
                         call = _itila_extract_cq_call(st['text_buf'], self.tracker.valid_calls)
-                        if call and call not in st['spotted']:
+                        if call:
                             st['spotted'].add(call)
-                            _emit_intent(st, f_khz, call, wpm, is_runner=True, raw_text=raw)
+                            _emit_intent(st, f_khz, call, wpm, is_runner=True,
+                                         raw_text=raw, window_id=window_id,
+                                         path_hz=path_hz,
+                                         envelope_signature=signature)
                             log.info("ITILA context %.1f kHz: %s %d WPM",
                                      f_khz, call, wpm)
                 else:
@@ -6988,8 +7349,22 @@ class SparkGap:
                         if max_spot_wpm and result.wpm > max_spot_wpm:
                             log.debug("WPM cap: %.1f kHz %d WPM > %d, skipped",
                                       result.freq_khz, result.wpm, max_spot_wpm)
-                            continue
-                        spots = self.tracker.process_intent(result)
+                            result.evidence_required = self.tracker.itila_min_windows
+                            result.decision = 'rejected-wpm'
+                            spots = []
+                        else:
+                            spots = self.tracker.process_intent(result)
+                        mqtt_cfg = self.cfg.get('mqtt', {})
+                        if mqtt_cfg.get('enabled', False):
+                            evidence_topic = mqtt_cfg.get(
+                                'cw_evidence_topic', 'skimmer/cw/evidence')
+                            evidence_payload = _cw_evidence_payload(
+                                result, _band_name,
+                                self.cfg.get('callsign', ''),
+                                self.cfg.get('grid', ''),
+                            )
+                            _publish_mqtt_json(
+                                mqtt_cfg, evidence_topic, evidence_payload)
                     else:
                         rf_khz, snr, text, ctx, dec_id, dec_type, wpm = result
                         log.debug("DECODED %.1f kHz: %r", rf_khz, text[:120])
@@ -7004,8 +7379,9 @@ class SparkGap:
                                                      dec_type=dec_type, wpm=wpm)
                     for spot in spots:
                         self.spot_count += 1
+                        corrected_khz = self._corrected_freq_khz(spot['freq_khz'])
                         self.telnet.broadcast_spot(
-                            freq_khz=self._corrected_freq_khz(spot['freq_khz']),
+                            freq_khz=corrected_khz,
                             dx_call=spot['call'],
                             snr=spot['snr'],
                             wpm=spot.get('wpm', 0),
@@ -7015,6 +7391,16 @@ class SparkGap:
                         log.info("*** SPOT: %10.1f  %-12s  %d dB  %d WPM  [%s] ***",
                                  spot['freq_khz'], spot['call'], spot['snr'],
                                  spot_wpm, method)
+                        mqtt_cfg = self.cfg.get('mqtt', {})
+                        if mqtt_cfg.get('enabled', False):
+                            topic = mqtt_cfg.get('cw_topic', 'skimmer/cw/spots')
+                            payload = _cw_spot_payload(
+                                spot, corrected_khz, _band_name,
+                                self.cfg.get('callsign', ''),
+                                self.cfg.get('grid', ''),
+                            )
+                            if _publish_mqtt_json(mqtt_cfg, topic, payload):
+                                log.debug("MQTT CW spot queued: %s %s", topic, spot['call'])
                         if self._spot_log:
                             import datetime
                             ts = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
@@ -7550,7 +7936,9 @@ def run_file_mode(args, config):
     gate_config = {k: config[k] for k in SpotTracker.GATE_DEFAULTS if k in config}
     tracker = SpotTracker(calls, blacklist, respot_interval=0, add_calls=add_calls,
                           scp_bypass_threshold=int(config.get('scp_bypass_threshold', 0)),
-                          gate_config=gate_config)
+                          gate_config=gate_config,
+                          itila_min_windows=int(config.get(
+                              'itila_min_consensus_windows', 2)))
 
     # Determine file format and sample rate
     with open(args.file, 'rb') as f:
@@ -7597,6 +7985,7 @@ def run_file_mode(args, config):
         enable_caller_spotting=bool(config.get('enable_caller_spotting', True)),
         exclude_ft8_freqs=bool(config.get('exclude_ft8_freqs', True)),
         exclude_ft4_freqs=bool(config.get('exclude_ft4_freqs', False)),
+        iaru_region=int(config.get('iaru_region', 2)),
     )
 
     center_khz = args.center_khz

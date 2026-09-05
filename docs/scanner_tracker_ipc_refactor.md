@@ -1,5 +1,11 @@
 # Refactor: structured IPC between _ItilaScanner and SpotTracker
 
+> **2026-09-05 follow-up:** the thin-wrapper/synthetic-CQ transitional state
+> described below has been removed. `process_intent()` now requires distinct
+> same-frequency native window evidence and publishes the original raw window
+> identity. See `cw_frequency_integrity.md` for the current contract. This file
+> remains as the historical design record for the IPC refactor.
+
 **Status:** scoped 2026-05-23. Predecessor fix (Option A — per-entry pending
 flush) shipped same day; this is the deeper architecture fix flagged during
 that work.

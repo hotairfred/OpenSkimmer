@@ -2,6 +2,35 @@
 
 Pre-1.0 alpha. No versioned releases yet — entries are dated.
 
+## 2026-09-05
+
+### Fixed
+
+- **ITILA frequency-integrity path.** Removed synthetic CQ context from
+  structured ITILA intents. Exact SCP calls now require at least two distinct
+  native decoder windows in the same 500 Hz bucket; duplicate MQTT/replay
+  delivery and the 100/200 Hz filter paths over one IQ window cannot
+  double-vote.
+- **12 kHz decimation aliases.** Replaced the 32-tap 192→12 kHz stage-one FIR
+  (about 13.4 dB rejection at 12 kHz) with a 95-tap Kaiser FIR measured at
+  about 93.7 dB rejection while preserving the CW baseband.
+- **C-worker result ownership.** Polled results are routed back to the manager
+  whose receiver passband contains their RF frequency rather than always to
+  the first manager.
+
+### Added
+
+- Native decoder results now carry scanner-session window sequence, filter
+  path, and a normalized 256-point envelope signature. The common C ABI is
+  guarded by an explicit 1328-byte size handshake.
+- MQTT `sparkgap.cw_evidence.v1` diagnostic events preserve raw decoder text,
+  evidence identity, consensus state, and cross-frequency envelope
+  correlation. Accepted spot messages link back to the decisive evidence.
+- Recorded-IQ native replay and FIR response regression tests. See
+  `docs/cw_frequency_integrity.md`.
+- Accepted MQTT spots now identify calls adjacent to CQ separately from calls
+  heard during the subsequent QSO.
+
 ## 2026-05-25
 
 ### Fixed (production-critical)

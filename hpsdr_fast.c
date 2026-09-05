@@ -111,7 +111,9 @@ typedef struct {
 
     /* Result ring buffer — worker writes, Python reads */
     #define RESULT_MAX 256
-    #define RESULT_SIZE 288   /* ScDecodeResult: 8+8+4+4+256+8 bytes (cost trailing) */
+    /* Common scanner result: legacy 288-byte prefix plus window/path identity
+     * and a 256-float normalized envelope signature. */
+    #define RESULT_SIZE 1328
     uint8_t result_buf[RESULT_MAX * RESULT_SIZE];
     volatile int result_write;
     volatile int result_read;
@@ -178,6 +180,8 @@ typedef struct {
     volatile uint64_t pkt_count;
     volatile uint64_t drop_count;
 } HpsdrFast;
+
+int hpsdr_result_size(void) { return RESULT_SIZE; }
 
 /* ---- ring buffer helpers ---- */
 static inline int ring_avail(const RxRing *r) {

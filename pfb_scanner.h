@@ -23,6 +23,10 @@ extern "C" {
 
 typedef struct PfbSc PfbSc;
 
+#define PFB_SC_SIGNATURE_LEN 256
+#define PFB_SC_RESULT_SIZE 1328
+int pfb_sc_result_size(void);
+
 /*
  * Create scanner.  Same signature as itila_sc_create so the Python
  * loader can drop this in with no parameter changes.
@@ -70,7 +74,13 @@ typedef struct {
     double f_hz;
     double snr;
     int    wpm;
+    int    _pad;
     char   text[256];
+    double cost;
+    unsigned long long window_id;
+    int    path_hz;
+    int    signature_n;
+    float  envelope_signature[PFB_SC_SIGNATURE_LEN];
 } PfbScDecodeResult;
 
 int pfb_sc_decode_ready(PfbSc *sc, int window_samples,

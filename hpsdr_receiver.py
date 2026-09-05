@@ -337,6 +337,7 @@ class HPSDRReceiver:
         start_time = time.time()
         pkt_count = 0
         last_report = start_time
+        last_keepalive = start_time
 
         while running:
             if duration and (time.time() - start_time) >= duration:
@@ -345,12 +346,14 @@ class HPSDRReceiver:
             ready = select.select([self.sock], [], [], 0.1)
             if not ready[0]:
                 # Send keepalive / freq update every second (active mode only)
-                if not self.passive and time.time() - last_report > 1.0:
+                now = time.time()
+                if not self.passive and now - last_keepalive > 1.0:
                     speed_bits = _SPEED_BITS.get(self.sample_rate, 0)
                     config_c0c4 = bytes([0x00, speed_bits, 0x00, 0x00,
                                          (1 << 2) | (((self.n_receivers - 1) & 0x07) << 3)])
                     freq_c0c4 = build_freq_packet(0, self.frequencies[0])
                     self._send_packet(config_c0c4, freq_c0c4)
+                    last_keepalive = now
                 continue
 
             try:

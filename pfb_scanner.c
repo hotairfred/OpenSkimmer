@@ -171,6 +171,7 @@ struct PfbSc {
     /* Diagnostic counters */
     uint64_t env_drops;
     uint64_t bins_at_max;
+    uint64_t decode_window_seq;
 
     /* Bayesian decoder hookup — same shape as itila_sc_set_decoder */
     void *(*dec_create)(int sample_rate, double lpf_hz);
@@ -182,6 +183,33 @@ struct PfbSc {
 };
 
 static void bin_free_decoders(PfbSc *sc, PsBin *b);
+
+static void envelope_signature(const double *env, int n, float *out)
+{
+    double mean = 0.0;
+    for (int j = 0; j < PFB_SC_SIGNATURE_LEN; j++) {
+        int lo = (int)(((int64_t)j * n) / PFB_SC_SIGNATURE_LEN);
+        int hi = (int)(((int64_t)(j + 1) * n) / PFB_SC_SIGNATURE_LEN);
+        if (hi <= lo) hi = lo + 1;
+        double sum = 0.0;
+        for (int i = lo; i < hi && i < n; i++) sum += env[i];
+        out[j] = (float)(sum / (double)(hi - lo));
+        mean += out[j];
+    }
+    mean /= PFB_SC_SIGNATURE_LEN;
+    double variance = 0.0;
+    for (int j = 0; j < PFB_SC_SIGNATURE_LEN; j++) {
+        double d = out[j] - mean;
+        variance += d * d;
+    }
+    double scale = sqrt(variance / PFB_SC_SIGNATURE_LEN);
+    if (scale < 1e-20) {
+        memset(out, 0, PFB_SC_SIGNATURE_LEN * sizeof(float));
+        return;
+    }
+    for (int j = 0; j < PFB_SC_SIGNATURE_LEN; j++)
+        out[j] = (float)((out[j] - mean) / scale);
+}
 
 /* ---------------------------------------------------------------------------
  * FFT (Cooley-Tukey in-place, power-of-2, forward) — copied verbatim from
@@ -731,6 +759,7 @@ int pfb_sc_decode_ready(PfbSc *sc, int window_samples,
         while (b->env_n >= window_samples) {
             void *handles[2] = { b->h100, b->h200 };
             double *envs[2]  = { b->env100, b->env200 };
+            uint64_t window_id = ++sc->decode_window_seq;
 
             for (int p = 0; p < 2; p++) {
                 if (!handles[p]) continue;
@@ -742,6 +771,13 @@ int pfb_sc_decode_ready(PfbSc *sc, int window_samples,
                     r->f_hz = b->f_hz;
                     r->snr  = b->snr_db;
                     r->wpm  = (int)(sc->dec_get_wpm(handles[p]) + 0.5);
+                    r->_pad = 0;
+                    r->cost = 999.0;
+                    r->window_id = window_id;
+                    r->path_hz = (p == 0) ? 100 : 200;
+                    r->signature_n = PFB_SC_SIGNATURE_LEN;
+                    envelope_signature(envs[p], window_samples,
+                                       r->envelope_signature);
                     int len = (int)strlen(raw);
                     if (len > 255) len = 255;
                     memcpy(r->text, raw, len);
@@ -761,6 +797,16 @@ int pfb_sc_decode_ready(PfbSc *sc, int window_samples,
     pthread_mutex_unlock(&sc->lock);
     return n_results;
 }
+
+#ifdef __cplusplus
+static_assert(sizeof(PfbScDecodeResult) == PFB_SC_RESULT_SIZE,
+              "PfbScDecodeResult ABI size mismatch");
+#else
+_Static_assert(sizeof(PfbScDecodeResult) == PFB_SC_RESULT_SIZE,
+               "PfbScDecodeResult ABI size mismatch");
+#endif
+
+int pfb_sc_result_size(void) { return (int)sizeof(PfbScDecodeResult); }
 
 static void bin_free_decoders(PfbSc *sc, PsBin *b)
 {

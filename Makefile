@@ -4,8 +4,21 @@ LIBDIRS	:=
 LIBS	:= -lcsdr++ -lfftw3f
 CFLAGS	:= -O3 $(INCDIRS)
 OBJECTS	:= cw-skimmer.o rtty-skimmer.o bufmodule.o
+BREW_PREFIX ?= $(shell brew --prefix 2>/dev/null || printf /opt/homebrew)
 
 all: csdr-cwskimmer csdr-rttyskimmer libcw_dispatcher.so libpfb_scanner.so
+
+# Minimal native set for SparkGap's HPSDR + ITILA path on Apple Silicon.
+# The .so suffix is retained because the Python loader uses these names;
+# the files themselves are Mach-O dynamic libraries.
+macos-native:
+	/usr/bin/clang -O2 -dynamiclib -fPIC -pthread -o libhpsdr_fast.so hpsdr_fast.c -lm
+	/usr/bin/clang -O3 -ffast-math -dynamiclib -fPIC -o libitila.so itila_core.c fb_core.c -lm
+	/usr/bin/clang -O3 -ffast-math -dynamiclib -fPIC -o libitila_dsp.so itila_dsp.c -lm
+	/usr/bin/clang -O3 -ffast-math -dynamiclib -fPIC -pthread -o libitila_scanner.so itila_scanner.c -lm
+	/usr/bin/clang++ -x c++ -O3 -ffast-math -dynamiclib -fPIC -pthread \
+	    -I$(BREW_PREFIX)/include -L$(BREW_PREFIX)/lib \
+	    -o libpfb_scanner.so pfb_scanner.c cw_pfb.cpp -lfftw3f -lm
 
 csdr-cwskimmer: cw-skimmer.o bufmodule.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LIBDIRS) $(LIBS)
@@ -39,4 +52,4 @@ clean:
 	      libcw_dispatcher.so libpfb_scanner.so \
 	      cw_dispatcher_test cw_dispatcher_pfb_test
 
-.PHONY: all clean dispatcher-test
+.PHONY: all clean dispatcher-test macos-native
